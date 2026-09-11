@@ -1,0 +1,85 @@
+# tsutawaru configuration. Copy to config.toml and edit.
+# Every value below is the built-in default — an empty file behaves identically.
+
+[audio]
+device        = "auto"      # "auto" | index int | substring of device name
+samplerate    = 16000       # target rate; capture runs at the device-native rate
+blocksize_ms  = 20
+channels      = 1
+loopback      = false       # Windows only: use the PyAudioWPatch loopback backend
+# How audio is captured.
+#   "auto"     -> "process" on macOS 14.4+ with proc-tap and psutil installed,
+#                 "device" everywhere else.
+#   "process"  -> tap ONE application directly via a Core Audio process tap. No
+#                 BlackHole, no Multi-Output Device, no output routing, and no
+#                 other application's sound. Requires Screen Recording AND
+#                 Microphone granted to "ProcTap Helper", and the tapped app must
+#                 output to your system default device. Never falls back: if it
+#                 cannot run, startup fails and says why.
+#   "device"   -> capture an input device (virtual loopback: BlackHole, VB-CABLE).
+#                 Records the whole system mix, so background audio is included.
+backend       = "auto"      # "auto" | "device" | "process"
+source        = "discord"   # backend="process" only: "discord" | "youtube"
+
+[vad]
+backend            = "silero"   # "silero" | "webrtc"  (webrtc needs Python 3.11)
+threshold          = 0.55       # silero speech probability
+aggressiveness     = 2          # webrtc 0..3
+preroll_ms         = 320        # rounded to whole 32 ms windows
+hangover_ms        = 448        # rounded to whole 32 ms windows
+min_utterance_ms   = 350
+max_utterance_ms   = 12000
+
+[stt]
+backend          = "auto"   # "auto" | "mlx" | "faster"
+# tiny | base | small | medium | kotoba
+# "kotoba" is kotoba-whisper-v2.0: Whisper distilled for Japanese on Japanese TV
+# broadcast audio (large-v3 encoder, 2-layer decoder). Measured against "medium"
+# on 80 identical utterances: markedly less fabrication on masked speech, but it
+# truncates some lines and runs ~17% slower here. Its avg_logprob scale differs
+# (mean -0.33 vs -0.59), so logprob_floor below culls far less under it: ~2% of
+# utterances against 15-21% under "medium".
+model            = "kotoba"
+language         = "ja"
+lang_mode        = "pinned" # "pinned" | "detect"
+beam_size        = 1        # greedy = lowest latency
+compute_type     = "auto"   # float16 | int8_float16 | int8
+no_speech_thresh = 0.6
+logprob_floor    = -1.0
+initial_prompt   = ""       # domain vocabulary priming
+
+[nlp]
+# "janome"  -> IPADIC, pure Python, no extra install. The default.
+# "mecab"   -> IPADIC via MeCab.
+# "unidic"  -> UniDic via fugashi. Needs `pip install fugashi` and a NINJAL
+#              dictionary unpacked under ~/.local/share/tsutawaru/ (see
+#              requirements.txt). Fails loudly if it cannot find one, rather
+#              than quietly running janome instead.
+tokenizer       = "janome"  # "janome" | "mecab" | "unidic"
+unidic_dir      = ""        # empty = newest unidic-* under the path above
+drop_pos        = ["記号", "補助記号", "空白", "フィラー", "その他"]
+agglutinate     = true      # merge bound morphemes (です+ね -> ですね)
+max_tokens      = 24
+particle_romaji = "hepburn" # "hepburn" (は->wa) | "literal" (は->ha)
+
+[translate]
+# "local" runs CAT-Translate on MLX with no network at all (Apple Silicon).
+# Glosses come from JMdict for every provider — build it once with:
+#   python -m tsutawaru.translate.jmdict
+provider           = "google"  # "google" | "deepl" | "local" | "none"
+deepl_api_key      = ""
+local_model        = "hotchpotch/CAT-Translate-1.4b-mlx-q4"  # or ...-0.8b-mlx-q4
+gloss_workers      = 3         # sentence translation gets its own dedicated worker
+sentence_timeout_s = 4.0
+token_timeout_s    = 3.0
+lru_size           = 20000
+persist_cache      = true
+
+[ui]
+sink           = "window"   # "window" (tsutawaru GUI) | "console" | "overlay"
+ws_port        = 8765
+max_lines      = 200
+show_romaji    = true
+show_breakdown = true
+plain          = false
+log_file       = ""

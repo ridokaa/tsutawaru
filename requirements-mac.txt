@@ -1,0 +1,18 @@
+mlx==0.32.0
+mlx-whisper==0.4.3
+PyQt6==6.11.0
+websockets==13.1
+pyobjc-framework-Cocoa==12.2.2   # names the macOS app menu "tsutawaru" (§ window UI)
+
+# Per-process audio capture. Required, not optional: [audio] backend defaults to
+# "auto", which resolves to "process" on macOS 14.4+ — without these two it falls
+# back to the device path and you are capturing the whole system mix again.
+proc-tap==1.1.1                  # Core Audio process taps (macOS 14.4+)
+psutil==7.2.2                    # resolves which child process carries an app's audio
+# Optional speed-up: replaces ProcTap's scipy resampler with libsamplerate. The tap
+# runs at the app's native rate (44.1 kHz for Chrome) and ProcTap converts to
+# 48 kHz on every chunk, which we then convert again to 16 kHz.
+#   pip install "proc-tap[hq-resample]"
+
+# Offline sentence translation ([translate] provider = "local"). MLX-only.
+mlx-lm==0.31.3
