@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>tsutawaru Overlay</title>
+  <style>
+    :root {
+      --bg: rgba(12, 14, 20, 0.85);
+      --text: #f0f2f5;
+      --jp-color: #ffffff;
+      --romaji-color: #64b5f6;
+      --en-color: #81c784;
+      --breakdown-color: #ffb74d;
+      --border: rgba(255, 255, 255, 0.1);
+    }
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: 'Hiragino Sans', 'Yu Gothic UI', 'Noto Sans JP', -apple-system, BlinkMacSystemFont, sans-serif;
+      color: var(--text);
+      background: transparent;
+      overflow: hidden;
+    }
+    body.chroma {
+      background: #00ff00 !important;
+    }
+    #container {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 100vh;
+      justify-content: flex-end;
+    }
+    .card {
+      background: var(--bg);
+      backdrop-filter: blur(8px);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 16px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      transition: all 0.2s ease;
+    }
+    .stream-tag {
+      font-size: 11px;
+      font-weight: bold;
+      color: #90caf9;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .jp {
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--jp-color);
+      margin-bottom: 4px;
+    }
+    .romaji {
+      font-size: 14px;
+      color: var(--romaji-color);
+      margin-bottom: 4px;
+    }
+    .en {
+      font-size: 16px;
+      font-weight: 500;
+      color: var(--en-color);
+      margin-bottom: 8px;
+    }
+    .breakdown {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      font-size: 12px;
+      border-top: 1px solid var(--border);
+      padding-top: 6px;
+    }
+    .token {
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 4px;
+      padding: 2px 6px;
+      display: inline-flex;
+      gap: 4px;
+    }
+    .token-surface { font-weight: 600; color: #fff; }
+    .token-romaji { color: #90caf9; font-size: 10px; }
+    .token-gloss { color: var(--breakdown-color); }
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #f44336;
+      margin-right: 6px;
+    }
+    .status-dot.connected { background: #4caf50; }
+  </style>
+</head>
+<body>
+  <div id="status" style="position: fixed; top: 8px; right: 8px; font-size: 11px; color: #888;">
+    <span class="status-dot" id="dot"></span><span id="status-text">Connecting...</span>
+  </div>
+  <div id="container"></div>
+
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('chroma') === '1') {
+      document.body.classList.add('chroma');
+    }
+    const maxBlocks = parseInt(urlParams.get('max') || '5', 10);
+    const container = document.getElementById('container');
+    const dot = document.getElementById('dot');
+    const statusText = document.getElementById('status-text');
+
+    const blocks = new Map();
+
+    function connect() {
+      const port = urlParams.get('port') || '8765';
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+
+      ws.onopen = () => {
+        dot.classList.add('connected');
+        statusText.textContent = 'Live';
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const seg = JSON.parse(event.data);
+          renderBlock(seg);
+        } catch (e) {
+          console.error('Failed to parse message', e);
+        }
+      };
+
+      ws.onclose = () => {
+        dot.classList.remove('connected');
+        statusText.textContent = 'Reconnecting...';
+        setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+    }
+
+    function renderBlock(seg) {
+      let el = document.getElementById(`block-${seg.id}`);
+      if (!el) {
+        el = document.createElement('div');
+        el.id = `block-${seg.id}`;
+        el.className = 'card';
+        container.appendChild(el);
+        blocks.set(seg.id, el);
+
+        while (container.children.length > maxBlocks) {
+          const firstKey = blocks.keys().next().value;
+          const oldEl = blocks.get(firstKey);
+          if (oldEl) oldEl.remove();
+          blocks.delete(firstKey);
+        }
+      }
+
+      let tokensHtml = '';
+      if (seg.tokens && seg.tokens.length > 0) {
+        tokensHtml = '<div class="breakdown">' + seg.tokens.map(t => `
+          <div class="token">
+            <span class="token-surface">${escapeHtml(t.s)}</span>
+            <span class="token-romaji">(${escapeHtml(t.r || '')})</span>
+            <span class="token-gloss">: ${escapeHtml(t.g || (t.g === null ? '…' : '?'))}</span>
+          </div>
+        `).join('') + '</div>';
+      }
+
+      el.innerHTML = `
+        <div class="stream-tag">[${escapeHtml(seg.stream || 'main')}]</div>
+        <div class="jp">${escapeHtml(seg.jp || '')}</div>
+        <div class="romaji">${escapeHtml(seg.romaji || '…')}</div>
+        <div class="en">${escapeHtml(seg.en || '…')}</div>
+        ${tokensHtml}
+      `;
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, m => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[m]);
+    }
+
+    connect();
+  </script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Local config (secrets, device ids) — see config.example.toml
+config.toml
+
+# Raw session recordings: audio clips, JSONL logs, raw console dumps.
+# Local only. The markdown derived from them (study sheets, comparison
+# sheets, accuracy checks) is tracked.
+experiments/**/wav/
+experiments/**/*.jsonl
+experiments/**/*.txt
+
+# Generated sheets: tools/compare4.py output and --export-md study exports.
+# Regenerable from the recordings above, and large. Hand-written analysis
+# (accuracy-check.md, the written comparisons) stays tracked.
+experiments/reports/
+experiments/**/study.md
+experiments/sessions/*.md
+
+# Editor swap files
+*.swp
+
+# Private working material — design plans, model research, findings,
+# and recorded/graded test sessions. Local only.
+docs/
+experiments/
