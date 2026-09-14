@@ -264,9 +264,17 @@ def main(
         if stats:
             from tsutawaru.pipeline import queues
 
+            from tsutawaru.stt.filters import drops
+
+            # Two different losses, deliberately named apart: "dropped" is
+            # queue eviction under overload, "filtered" is an utterance the
+            # STT filters discarded and why. They have different fixes.
+            d = drops()
             print("\n" + metrics.format_table({
                 "uptime": f"{metrics.uptime():.0f}s",
                 "dropped": str(queues.total_dropped()),
+                "filtered": ", ".join(f"{k}={v}" for k, v in
+                                      sorted(d.items(), key=lambda kv: -kv[1])) or "0",
             }), file=sys.stderr)
 
 

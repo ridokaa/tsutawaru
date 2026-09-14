@@ -122,6 +122,12 @@ class VadCfg:
     hangover_ms: int = 448  # rounded to whole 32 ms windows
     min_utterance_ms: int = 350
     max_utterance_ms: int = 12000
+    # Show a transcript of speech still in progress once it passes this long,
+    # replaced in place when the utterance closes. 0 disables it. Costs one
+    # extra STT pass per long utterance and is skipped whenever STT is already
+    # behind, so it never delays a real line. Below ~2 s it fires on ordinary
+    # short utterances that were about to land anyway.
+    provisional_after_ms: int = 2500
 
 
 @dataclass
@@ -159,9 +165,17 @@ class NlpCfg:
 class TranslateCfg:
     provider: str = "google"  # "google" | "deepl" | "local" | "none"
     deepl_api_key: str = ""
-    # provider="local" only: the MLX repo for the sentence lane. 1.4b is the
-    # quality pick; swap in CAT-Translate-0.8b-mlx-q4 on a tighter memory budget.
-    local_model: str = "hotchpotch/CAT-Translate-1.4b-mlx-q4"
+    # provider="local" only: the MLX repo for the sentence lane. 4B beat the
+    # 1.4B specialist 1 objective defect to 16 over the same 120 lines; drop to
+    # hotchpotch/CAT-Translate-1.4b-mlx-q4 on a tighter memory budget.
+    local_model: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    # Previous Japanese lines fed to the sentence lane as fenced context. Off,
+    # because measured on this project's own data it does not reduce defects (1
+    # at 0 lines against 2 at 3 lines), costs 100 ms, and turns a garbled ASR
+    # line into fluent invention: with nothing translatable in front of it the
+    # model writes a plausible continuation of the *context* instead. See
+    # local_mlx.py. Raise it only with a model of ~4B or larger and clean input.
+    local_context_lines: int = 0
     gloss_workers: int = 3  # sentence translation gets its own dedicated worker
     sentence_timeout_s: float = 4.0
     token_timeout_s: float = 3.0

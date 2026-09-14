@@ -26,6 +26,12 @@ class Utterance:
     t_end: float
     stream: str = "main"
     forced: bool = False  # True when emitted by the max-length flush
+    # Utterances from one run of speech share a line_id, so a provisional
+    # transcript and the final one that replaces it land on the same UI line.
+    # 0 means "not part of a provisional pair" — every utterance the VAD emits
+    # without provisional output enabled.
+    line_id: int = 0
+    provisional: bool = False  # a prefix of speech still in progress
 
     @property
     def duration(self) -> float:
@@ -78,6 +84,10 @@ class Segment:
     # read as maximally certain that speech is present.
     no_speech: float = -1.0
     truncated: int = 0  # tokens dropped by max_tokens; rendered as "… (+N tokens)"
+    # A prefix of speech still being spoken, shown early and replaced in place
+    # when the utterance closes. Never translated: half a sentence is exactly
+    # what the sentence lane cannot render honestly.
+    provisional: bool = False
     continued: bool = False  # follows a forced flush — same speaker turn
     t_audio_end: float = 0.0
     t_stt_done: float = 0.0
