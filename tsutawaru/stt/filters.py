@@ -1,6 +1,8 @@
 """Whisper hallucination and repetition filtering (§6.1)."""
 from __future__ import annotations
 
+import collections
+
 
 HALLUCINATIONS = {
     "ご視聴ありがとうございました",
@@ -48,37 +50,104 @@ PEAK_FLOOR_RATIO = 0.16
 PEAK_REF_MIN_SAMPLES = 20
 
 
-def is_hallucination(text: str, result=None, cfg=None, peak: float | None = None,
-                     peak_ref: float | None = None) -> bool:
-    """Filter one transcription.
+#: Why utterances were discarded this run, by reason. Not locked: the pipeline
+#: runs exactly one `_stt_worker` and it is the only writer, the same
+#: single-consumer assumption `QwenMLXEngine._ensure_session` relies on. A lock
+#: here would imply a second caller is supported when it is not.
+DROPS: collections.Counter = collections.Counter()
+
+
+def drops() -> dict[str, int]:
+    """A snapshot of `DROPS` for display. Empty when nothing was discarded."""
+    return dict(DROPS)
+
+
+def drop_reason(text: str, result=None, cfg=None, peak: float | None = None,
+                peak_ref: float | None = None) -> str | None:
+    """Why this transcription should be discarded, or None to keep it.
 
     `peak` is max |sample| of the utterance and `peak_ref` the source's running
     median peak, when the caller has the audio. Both are needed for the
     amplitude test: the threshold only means anything relative to how loud this
     particular source runs. Passing neither leaves behaviour unchanged.
+
+    Returns a reason rather than a bool because a fifth of captured speech was
+    being discarded with no record of which rule did it — see
+    `pipeline/orchestrator.py:_emit_segment`, which counts what comes back here.
     """
     t = text.strip()
     if not t:
-        return True
+        return "empty"
     if t in HALLUCINATIONS:
-        return True
+        return "wordlist"
     if t in SHORT_AMBIGUOUS:
         if peak is not None and peak_ref:
             if peak < PEAK_FLOOR_RATIO * peak_ref:
-                return True
+                return "peak-gate"
         if result is None:
-            return False
-        return (
-            getattr(result, "no_speech_prob", 0.0) > 0.5
-            or getattr(result, "avg_logprob", 0.0) < -0.9
-        )
+            return None
+        if getattr(result, "no_speech_prob", 0.0) > 0.5:
+            return "no-speech"
+        if getattr(result, "avg_logprob", 0.0) < -0.9:
+            return "low-confidence"
+        return None
     if len(set(t)) <= 2 and len(t) > 6:  # ああああああ / ーーーーー
-        return True
+        return "single-char"
     if result and cfg and getattr(result, "avg_logprob", 0.0) < cfg.logprob_floor:
-        return True
+        return "low-confidence"
     if result and getattr(result, "no_speech_prob", 0.0) > 0.8:
-        return True
+        return "no-speech"
     for n in (3, 4, 5):  # n-gram repetition loops
         if len(t) >= n * 3 and t[:n] * 3 in t:
-            return True
-    return False
+            return "repetition"
+    return None
+
+
+def is_hallucination(text: str, result=None, cfg=None, peak: float | None = None,
+                     peak_ref: float | None = None) -> bool:
+    """Whether to discard. `drop_reason` is the same test with the reason kept."""
+    return drop_reason(text, result, cfg, peak, peak_ref) is not None
+
+
+if __name__ == "__main__":  # self-check: python -m tsutawaru.stt.filters
+    # The regression this guards: a reason string that no longer matches the
+    # branch it names, which would make the drop histogram confidently wrong.
+    class _R:
+        def __init__(self, lp=0.0, ns=0.0):
+            self.avg_logprob, self.no_speech_prob = lp, ns
+
+    class _C:
+        logprob_floor = -1.0
+
+    cases = [
+        ("", None, None, {}, "empty"),
+        ("   ", None, None, {}, "empty"),
+        ("ご視聴ありがとうございました", None, None, {}, "wordlist"),
+        ("はい", _R(), None, {"peak": 0.01, "peak_ref": 0.73}, "peak-gate"),
+        ("はい", _R(ns=0.9), None, {}, "no-speech"),
+        ("はい", _R(lp=-1.5), None, {}, "low-confidence"),
+        ("ああああああああ", None, None, {}, "single-char"),
+        # Two distinct characters is still "single-char", and that branch runs
+        # first — そうそう… is caught there, not by the n-gram test below.
+        ("そうそうそうそうそう", None, None, {}, "single-char"),
+        ("こんにちはこんにちはこんにちは", None, None, {}, "repetition"),
+        ("結構早いな", _R(), _C(), {}, None),
+        ("はい", None, None, {}, None),                       # no evidence, no opinion
+        ("はい", _R(), None, {"peak": 0.5, "peak_ref": 0.73}, None),
+    ]
+    for text, res, cfg, kw, want in cases:
+        got = drop_reason(text, res, cfg, **kw)
+        assert got == want, f"{text!r} -> {got!r}, expected {want!r}"
+        # The wrapper the existing tests assert on must agree, always.
+        assert is_hallucination(text, res, cfg, **kw) is (want is not None), text
+
+    DROPS.clear()
+    for text, res, cfg, kw, _ in cases:
+        r = drop_reason(text, res, cfg, **kw)
+        if r:
+            DROPS[r] += 1
+    assert drops() == {"empty": 2, "wordlist": 1, "peak-gate": 1, "no-speech": 1,
+                       "low-confidence": 1, "single-char": 2, "repetition": 1}, drops()
+    DROPS.clear()
+
+    print("filters self-check OK")

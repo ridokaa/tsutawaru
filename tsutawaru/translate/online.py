@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import threading
 from deep_translator import DeeplTranslator, GoogleTranslator
-from tenacity import retry, stop_after_attempt, wait_exponential_jitter
+from deep_translator.exceptions import RequestError, TooManyRequests
+from tenacity import (retry, retry_if_not_exception_type, stop_after_attempt,
+                      wait_exponential_jitter)
 
 from tsutawaru.config import TranslateCfg
 from tsutawaru.logbus import get_logger
@@ -69,6 +71,7 @@ class OnlineTranslator(Translator):
             _install_browser_ua()
             self._mk = lambda: GoogleTranslator(source="ja", target="en")
         self._local = threading.local()
+        self._warned = False
 
     @property
     def t(self):
@@ -76,19 +79,88 @@ class OnlineTranslator(Translator):
             self._local.t = self._mk()
         return self._local.t
 
+    # Retry timeouts and dropped connections, never a refusal. A 429 is the
+    # CAPTCHA interstitial ("unusual traffic from your computer network"), which
+    # no second attempt fixes — it is keyed on the IP and caused by volume, so
+    # retrying it triples the traffic that earned the block in the first place.
     @retry(
+        retry=retry_if_not_exception_type((TooManyRequests, RequestError)),
         stop=stop_after_attempt(3),
         wait=wait_exponential_jitter(initial=0.2, max=2.0),
         reraise=True,
     )
-    def sentence(self, text: str) -> str:
+    def _translate(self, text: str) -> str:
         return self.t.translate(text)
 
-    def batch(self, texts: list[str]) -> list[str]:
-        """One round-trip for N tokens."""
-        if not texts:
-            return []
+    def sentence(self, text: str, remember: bool = True) -> str:
+        # `remember` is meaningless here: each request is independent and the
+        # backend keeps nothing between them. Accepted so the two providers
+        # stay interchangeable.
         try:
-            return self.t.translate_batch(texts)
-        except Exception:
-            return [self.sentence(x) for x in texts]
+            return self._translate(text)
+        except TooManyRequests:
+            if not self._warned:
+                self._warned = True
+                log.warning(
+                    "%s is refusing requests from this IP (429 CAPTCHA). It "
+                    "clears on its own in a few hours; until then run with "
+                    "--provider local for offline translation.", self.name)
+            raise
+
+    def batch(self, texts: list[str], remember: bool = True) -> list[str]:
+        """N round-trips, not one: neither backend has a batch endpoint.
+
+        `deep_translator.translate_batch` is a for-loop over `translate`
+        (base.py:171). Per item rather than one try/except over the list,
+        because that shape discards the items that already succeeded and then
+        re-requests every one of them through the retrying path.
+        """
+        out = []
+        for x in texts:
+            try:
+                out.append(self.sentence(x))
+            except Exception:
+                out.append("")  # `_glosses` renders this as "?"
+        return out
+
+
+if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.online
+    # The regression this guards: a refusal costing more requests than a
+    # success. Counts calls rather than asserting on timing, because the whole
+    # defect is a count.
+    class _Stub:
+        def __init__(self, exc):
+            self.exc, self.calls = exc, 0
+
+        def translate(self, text: str) -> str:
+            self.calls += 1
+            raise self.exc()
+
+    def _mk(exc) -> tuple[OnlineTranslator, _Stub]:
+        t = OnlineTranslator.__new__(OnlineTranslator)
+        t.name, t._warned = "google", False
+        stub = _Stub(exc)
+        t._local = threading.local()
+        t._local.t = stub
+        return t, stub
+
+    t, stub = _mk(TooManyRequests)
+    try:
+        t.sentence("こんにちは")
+    except TooManyRequests:
+        pass
+    assert stub.calls == 1, f"429 retried {stub.calls}x — that is the bug"
+
+    t, stub = _mk(TooManyRequests)
+    assert t.batch(["a", "b", "c"]) == ["", "", ""]
+    assert stub.calls == 3, f"3 tokens cost {stub.calls} requests"
+
+    # Narrowed, not removed: a transient fault still gets its three attempts.
+    t, stub = _mk(TimeoutError)
+    try:
+        t.sentence("x")
+    except TimeoutError:
+        pass
+    assert stub.calls == 3, f"timeout attempted {stub.calls}x, expected 3"
+
+    print("online self-check OK")

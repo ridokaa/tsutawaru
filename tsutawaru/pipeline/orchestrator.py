@@ -149,6 +149,20 @@ class Stages:
     missing: list[StageNotImplemented] = None  # type: ignore[assignment]
 
 
+def _count_drop(why: str, utt: Utterance, text: str) -> None:
+    """Record a discarded utterance under a named reason.
+
+    `utt.id` is what `_dump` names its WAV file, so a session run with
+    --dump-utterances can be re-listened clip by clip against this log. The
+    counter is printed by `run.py --stats`; without it a fifth of captured
+    speech vanished with no record of which rule took it.
+    """
+    from tsutawaru.stt.filters import DROPS
+
+    DROPS[why] += 1
+    log.debug("dropped utt %05d (%s): %r", utt.id, why, text)
+
+
 class Orchestrator:
     def __init__(self, cfg: Config, *, dump_utterances: str | None = None,
                  record: str | None = None, export_md: str | None = None):
@@ -159,6 +173,11 @@ class Orchestrator:
         self.threads: list[threading.Thread] = []
         self.stages = Stages(missing=[])
         self.dump_utterances = dump_utterances
+        # line_id -> the Segment shown for speech still in progress, revised in
+        # place when the utterance closes. Bounded because a final utterance can
+        # in principle be evicted from utt_q under load, which would strand its
+        # entry here; only the run currently being spoken is ever live.
+        self._provisional: dict[int, "Segment"] = {}
         from tsutawaru.pipeline.recorder import SessionRecorder
 
         self.recorder = SessionRecorder(
@@ -633,16 +652,54 @@ class Orchestrator:
             log.debug("comparison romaji failed", exc_info=True)
             return ""
 
+    def _show_provisional(self, utt: Utterance, text: str) -> None:
+        """Paint a line for speech that is still being spoken.
+
+        Registered with the recorder like any other segment, because the same
+        object is revised in place when the utterance closes — the session log
+        therefore records the final text, never the preview.
+
+        Deliberately not translated: it goes to `seg_q` for romaji and tokens
+        and stops there. Half a sentence is exactly the input the sentence lane
+        cannot render honestly, and a translation that rewrites itself mid-read
+        is worse than one that arrives a second later.
+        """
+        from tsutawaru.models import Segment
+
+        seg = self._provisional.get(utt.line_id)
+        if seg is None:
+            seg = Segment.new(stream=utt.stream, original=text,
+                              lang=self.cfg.stt.language, provisional=True,
+                              t_audio_end=utt.t_end, t_stt_done=time.monotonic())
+            self._provisional[utt.line_id] = seg
+            for stale in list(self._provisional)[:-4]:
+                self._provisional.pop(stale, None)
+            self.recorder.add(seg)
+        else:
+            seg.original, seg.romaji, seg.tokens = text, "", []
+        ui_q.put(("new", seg))
+        seg_q.put_latest(seg)
+
     def _emit_segment(self, utt: Utterance, res):
         from tsutawaru.models import Segment
 
         text = (getattr(res, "text", "") or "").strip()
+        if utt.provisional:
+            # No filtering: the rules exist to suppress inventions on silence,
+            # and a prefix of speech that is demonstrably still going is not
+            # that. An empty one is simply nothing to show yet.
+            if text:
+                self._show_provisional(utt, text)
+            return
         if not text:
+            # Ahead of the peak accounting below, not folded into drop_reason:
+            # an utterance that transcribed to nothing must not join `_peaks`,
+            # or silence drags the source's median down and the peak gate with
+            # it. Counted all the same — it is the largest bucket.
+            _count_drop("empty", utt, text)
             return
         try:
-            is_hallucination = _require(
-                "tsutawaru.stt.filters", "is_hallucination", "§6.1"
-            )
+            drop_reason = _require("tsutawaru.stt.filters", "drop_reason", "§6.1")
             min_samples = _require(
                 "tsutawaru.stt.filters", "PEAK_REF_MIN_SAMPLES", "§6.1"
             )
@@ -657,30 +714,43 @@ class Orchestrator:
                 statistics.median(self._peaks)
                 if len(self._peaks) >= min_samples else None
             )
-            if is_hallucination(text, res, self.cfg.stt, peak=peak, peak_ref=ref):
+            why = drop_reason(text, res, self.cfg.stt, peak=peak, peak_ref=ref)
+            if why:
+                _count_drop(why, utt, text)
                 return
         except StageNotImplemented:
-            pass  # filter not built yet — pass everything through
+            if not text:
+                return  # filter not built yet — but never emit an empty line
 
-        seg = Segment.new(
-            stream=utt.stream,
-            original=text,
-            lang=getattr(res, "language", "ja"),
-            confidence=getattr(res, "avg_logprob", 0.0),
-            no_speech=getattr(res, "no_speech_prob", -1.0),
-            continued=utt.forced,
-            t_audio_end=utt.t_end,
-            t_stt_done=time.monotonic(),
-        )
+        seg = self._provisional.pop(utt.line_id, None) if utt.line_id else None
+        if seg is not None:
+            # Revised in place, keeping the id: the window keys its lines on
+            # `seg.id` and the recorder holds this very reference, so mutating
+            # it replaces the line the reader is already looking at instead of
+            # printing the same sentence twice.
+            seg.original = text
+            seg.romaji, seg.tokens, seg.truncated = "", [], 0
+            seg.provisional = False
+            seg.confidence = getattr(res, "avg_logprob", 0.0)
+            seg.no_speech = getattr(res, "no_speech_prob", -1.0)
+            seg.continued = utt.forced
+            seg.t_audio_end, seg.t_stt_done = utt.t_end, time.monotonic()
+        else:
+            seg = Segment.new(
+                stream=utt.stream,
+                original=text,
+                lang=getattr(res, "language", "ja"),
+                confidence=getattr(res, "avg_logprob", 0.0),
+                no_speech=getattr(res, "no_speech_prob", -1.0),
+                continued=utt.forced,
+                t_audio_end=utt.t_end,
+                t_stt_done=time.monotonic(),
+            )
+            self.recorder.add(seg)
         if self.stages.stt_compare is not None:
             # Only while comparing: an ordinary session's recorded lines stay
             # exactly the shape they were before the A/B lane existed.
             seg.model = self.cfg.stt.model
-        # Registered at birth, not on completion. The recorder holds the
-        # reference and renders at shutdown, by which point the later stages
-        # have filled it in — see recorder.py for why no completion event is
-        # trustworthy enough to write on.
-        self.recorder.add(seg)
         ui_q.put(("new", seg))  # paint the JP line before translation
         seg_q.put_latest(seg)
         if self.stages.stt_compare is not None:
@@ -705,6 +775,10 @@ class Orchestrator:
                 continue
             metrics.record("nlp", (time.perf_counter() - t0) * 1000)
             ui_q.put(("romaji", seg))
+            if seg.provisional:
+                # Romaji and tokens only. The sentence lane sees this line once,
+                # when it is whole — see `_show_provisional`.
+                continue
             trans_q.put_latest(seg)
 
     def _translate_worker(self):

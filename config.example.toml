@@ -29,6 +29,11 @@ preroll_ms         = 320        # rounded to whole 32 ms windows
 hangover_ms        = 448        # rounded to whole 32 ms windows
 min_utterance_ms   = 350
 max_utterance_ms   = 12000
+# Show a transcript of speech still in progress once it passes this long, then
+# replace it in place when the utterance closes. 0 disables it. Fires on ~29% of
+# utterances on the recorded corpora, costs one extra STT pass each, and is
+# skipped whenever STT is already behind, so it never delays a real line.
+provisional_after_ms = 2500
 
 [stt]
 backend          = "auto"   # "auto" | "mlx" | "faster"
@@ -46,6 +51,21 @@ beam_size        = 1        # greedy = lowest latency
 compute_type     = "auto"   # float16 | int8_float16 | int8
 no_speech_thresh = 0.6
 logprob_floor    = -1.0
+# Vocabulary priming. Under model="qwen3" this is passed straight through to
+# Qwen3-ASR's context-biasing input, which nudges recognition toward these words
+# without them being transcribable. Whisper prepends it to the decoder history
+# instead and can echo it back, so keep it short under kotoba.
+#
+# The FRAMING is load-bearing: lead with "Proper nouns:" or "Technical terms:".
+# A bare comma list reads as text to continue rather than metadata about the
+# audio, and measurably makes accuracy worse.
+#
+# Build the list from your own sessions, and verify every entry by hand. Left to
+# itself the ASR spells an unfamiliar name a different way almost every time it
+# hears one — a single speaker's handle came back eight ways in one recording
+# here — so a list of its raw guesses biases recognition toward a wrong
+# spelling. Keep only the entries you have confirmed:
+# initial_prompt = "Proper nouns: <names you have verified>"
 initial_prompt   = ""       # domain vocabulary priming
 
 [nlp]
@@ -63,12 +83,19 @@ max_tokens      = 24
 particle_romaji = "hepburn" # "hepburn" (は->wa) | "literal" (は->ha)
 
 [translate]
-# "local" runs CAT-Translate on MLX with no network at all (Apple Silicon).
+# "local" runs the sentence lane on MLX with no network at all (Apple Silicon).
 # Glosses come from JMdict for every provider — build it once with:
 #   python -m tsutawaru.translate.jmdict
 provider           = "google"  # "google" | "deepl" | "local" | "none"
 deepl_api_key      = ""
-local_model        = "hotchpotch/CAT-Translate-1.4b-mlx-q4"  # or ...-0.8b-mlx-q4
+# 1 objective defect per 120 lines against CAT-Translate-1.4b's 16, for +190 ms
+# and +1.4 GB. Swap in "hotchpotch/CAT-Translate-1.4b-mlx-q4" on a tighter
+# memory budget, or if the ASR is losing utterances to GPU contention.
+local_model        = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+# Previous Japanese lines given to the translator as context. Off: it does not
+# reduce defects here and turns a garbled ASR line into fluent invention. See
+# tsutawaru/translate/local_mlx.py.
+local_context_lines = 0
 gloss_workers      = 3         # sentence translation gets its own dedicated worker
 sentence_timeout_s = 4.0
 token_timeout_s    = 3.0

@@ -12,8 +12,13 @@ class Translator(Protocol):
     #: provider="deepl" with no API key silently becomes Google.
     name: str
 
-    def sentence(self, text: str) -> str:
+    #: `remember=False` asks a stateful backend not to keep this line as
+    #: context for the next one. Only the compare lane passes it — that lane is
+    #: a second transcript of audio the primary lane already sent, so keeping
+    #: both would put the same utterance in the context twice. Stateless
+    #: backends accept and ignore it.
+    def sentence(self, text: str, remember: bool = True) -> str:
         ...
 
-    def batch(self, texts: list[str]) -> list[str]:
+    def batch(self, texts: list[str], remember: bool = True) -> list[str]:
         ...

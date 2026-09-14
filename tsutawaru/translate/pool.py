@@ -107,7 +107,7 @@ class TranslationPool:
         t0 = time.perf_counter()
         backend = self.backend
         try:
-            seg.alt_english = backend.sentence(seg.alt_original)
+            seg.alt_english = backend.sentence(seg.alt_original, remember=False)
         except Exception as e:
             seg.alt_english = f"[translation unavailable: {type(e).__name__}]"
         metrics.record("xlate_alt", (time.perf_counter() - t0) * 1000)
