@@ -21,11 +21,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt6")
 
 from tsutawaru.config import UiCfg  # noqa: E402
-from tsutawaru.models import Segment  # noqa: E402
+from tsutawaru.models import Segment, Token  # noqa: E402
 from tsutawaru.pipeline.queues import ui_q  # noqa: E402
 from tsutawaru.ui.window_qt import (  # noqa: E402
-    LIVE_MAX_PX, LIVE_MIN_PX, TranscriptWindow, WindowSink, _fmt_block,
-    _untrusted,
+    LIVE_MAX_PX, LIVE_MIN_PX, TOK_SCHEME, TranscriptWindow, WindowSink,
+    _fmt_block, _untrusted,
 )
 
 JP = "昨日の夜に友達と映画を見に行ったんだけど、思っていたよりずっと面白かった"
@@ -43,7 +43,7 @@ def sink(qapp):
     while not ui_q.empty():          # other tests share the module-level queue
         ui_q.get_nowait()
     s = WindowSink(UiCfg(), device_name="Test Device")
-    win = TranscriptWindow(s.cfg, on_clear=s.clear)
+    win = TranscriptWindow(s.cfg, on_clear=s.clear, on_toggle=s.toggle)
     win.resize(700, 760)
     win.show()
     qapp.processEvents()
@@ -102,6 +102,55 @@ def test_no_selection_still_repaints(sink):
     app.processEvents()
     assert "this is line 0" in win.view.toPlainText()
     assert not s._dirty
+
+
+def _click_toggle(view, qapp) -> bool:
+    """Click the card's breakdown toggle the way a reader does.
+
+    Synthetic, but through the real event path: the bug is in what Qt does to
+    the selection on a link click, which no direct call to the handler shows.
+    """
+    from PyQt6 import QtCore
+    from PyQt6.QtTest import QTest
+
+    lay = view.document().documentLayout()
+    off = view.verticalScrollBar().value()
+    for y in range(0, view.viewport().height(), 2):
+        for x in range(10, 400, 4):
+            if lay.anchorAt(QtCore.QPointF(x, y + off)).startswith(TOK_SCHEME):
+                QTest.mouseClick(view.viewport(),
+                                 QtCore.Qt.MouseButton.LeftButton,
+                                 QtCore.Qt.KeyboardModifier.NoModifier,
+                                 QtCore.QPoint(x, y))
+                qapp.processEvents()
+                return True
+    return False
+
+
+@pytest.mark.parametrize("pane", ["view", "live"])
+def test_opening_a_breakdown_is_not_a_selection(sink, pane):
+    """Qt selects a link's own text when it is clicked — one click on the toggle
+    left "▸ 2 words" selected. The freeze read that as the reader holding a
+    selection and stopped rebuilding, so the breakdown stayed shut, with
+    "paused — text selected" under it, until they clicked somewhere else."""
+    s, win, app = sink
+    toks = [Token(surface="水", base_form="水", romaji="mizu", gloss="water"),
+            Token(surface="飲む", base_form="飲む", romaji="nomu", gloss="to drink")]
+    for jp in ("水を飲む。", "そうだね。"):
+        ui_q.put(("new", Segment.new(stream="main", original=jp, romaji="r",
+                                     english="e", partial=False,
+                                     tokens=list(toks))))
+    s.tick(win)
+    app.processEvents()
+
+    view = getattr(win, pane)
+    assert _click_toggle(view, app), f"no toggle anchor found in {pane}"
+    s.tick(win)
+    app.processEvents()
+
+    assert not win.has_selection()
+    assert "paused" not in win.status.currentMessage()
+    assert "water" in view.toPlainText(), "breakdown did not open on the first click"
 
 
 def test_clear_does_not_come_back(sink):

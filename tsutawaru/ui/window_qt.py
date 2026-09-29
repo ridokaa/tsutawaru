@@ -721,11 +721,29 @@ try:
 
         def _on_anchor(self, url) -> None:
             href = url.toString()
-            if href.startswith(TOK_SCHEME) and self._on_toggle is not None:
-                try:
-                    self._on_toggle(int(href[len(TOK_SCHEME):]))
-                except ValueError:  # pragma: no cover - defensive
-                    pass
+            if not href.startswith(TOK_SCHEME):
+                return
+            # Qt selects the anchor's own text when a link is clicked — measured:
+            # one click on the toggle leaves "▸ 2 words" selected. `tick` reads
+            # any selection as the reader holding one and stops rebuilding, so
+            # the breakdown did not open until they clicked elsewhere to
+            # deselect: the toggle looked broken, with "paused — text selected"
+            # underneath it. A click on a control is a command, not a selection.
+            #
+            # Only the view that was clicked is cleared. Both of them route here,
+            # and a reader can be holding a real selection in one while toggling
+            # a line in the other.
+            view = self.sender()
+            if isinstance(view, QtWidgets.QTextBrowser):
+                cur = view.textCursor()
+                cur.clearSelection()
+                view.setTextCursor(cur)
+            if self._on_toggle is None:
+                return
+            try:
+                self._on_toggle(int(href[len(TOK_SCHEME):]))
+            except ValueError:  # pragma: no cover - defensive
+                pass
 
         def _clear(self) -> None:
             """Drop the transcript for real, including the live lane."""
@@ -999,19 +1017,13 @@ class WindowSink:
         app.setApplicationName(WINDOW_TITLE)
         app.setApplicationDisplayName(WINDOW_TITLE)
 
-        def _toggle(seg_id: int) -> None:
-            self._expanded.symmetric_difference_update({seg_id})
-            if seg_id in self._expanded:
-                self._backfill(seg_id)
-            self._dirty = True  # picked up by the next tick
-
         def _refresh() -> None:
             self._dirty = True
 
         win = TranscriptWindow(
             self.cfg, on_close=stop_evt.set, sources=self.sources,
             on_source=self.on_source, current_source=self.current_source,
-            on_toggle=_toggle, on_refresh=_refresh, on_clear=self.clear,
+            on_toggle=self.toggle, on_refresh=_refresh, on_clear=self.clear,
         )
         win.set_html(_empty_state(self.device_name, self.current_source), True)
         win.show()
@@ -1049,6 +1061,14 @@ class WindowSink:
         self._expanded.clear()
         self._backfilled.clear()
         self._dirty = True
+
+    def toggle(self, seg_id: int) -> None:
+        """Open or close one line's per-word breakdown. Wired to the card's
+        toggle anchor in both views."""
+        self._expanded.symmetric_difference_update({seg_id})
+        if seg_id in self._expanded:
+            self._backfill(seg_id)
+        self._dirty = True  # picked up by the next tick
 
     def tick(self, win) -> None:
         """One poll: drain the queue, repaint if anything changed.
