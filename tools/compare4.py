@@ -50,7 +50,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from tsutawaru.config import load  # noqa: E402
 
 CELLS = [("A", "qwen3", "google"), ("B", "kotoba", "google"),
-         ("C", "qwen3", "local"), ("D", "kotoba", "local")]
+         ("C", "qwen3", "mlx"), ("D", "kotoba", "mlx")]
 
 
 class Timed:
@@ -92,7 +92,7 @@ def _sample(items: list, limit: int | None) -> list:
 
 
 def _mk(provider: str, cfg):
-    if provider == "local":
+    if provider == "mlx":
         from tsutawaru.translate.local_mlx import LocalTranslator
 
         return LocalTranslator(cfg.translate)
@@ -121,14 +121,14 @@ def from_session(path: pathlib.Path, limit: int | None, cfg) -> tuple[list[dict]
     if not rows_in:
         raise SystemExit(
             f"{path} has no lines with a comparison lane. Record one with "
-            "`--model qwen3` and `[stt] compare_model = \"kotoba\"`, or use --wav."
+            "`--asr qwen3` and `[stt] compare_model = \"kotoba\"`, or use --wav."
         )
     models = (rows_in[0].get("model") or "?", (rows_in[0].get("alt") or {}).get("model") or "?")
     rows_in = _sample(rows_in, limit)
 
     print(f"[compare4] {len(rows_in)} lines from {path.name}; "
           f"cells A/B read from the recording ({models[0]} / {models[1]} + google)")
-    local = Timed(_mk("local", cfg))
+    local = Timed(_mk("mlx", cfg))
 
     out = []
     for i, d in enumerate(rows_in, 1):
@@ -162,7 +162,7 @@ def from_wav(d: pathlib.Path, limit: int | None, cfg) -> tuple[list[dict], dict]
         e.warmup()
         engines[name] = e
         asr_ms[name] = []
-    google, local = Timed(_mk("google", cfg)), Timed(_mk("local", cfg))
+    google, local = Timed(_mk("google", cfg)), Timed(_mk("mlx", cfg))
 
     out = []
     for i, w in enumerate(wavs, 1):
@@ -246,7 +246,7 @@ def write_sheet(rows: list[dict], stats: dict, src: str, path: pathlib.Path) -> 
     for name, v in (("ASR qwen3", stats["asr"].get("qwen3")),
                     ("ASR kotoba", stats["asr"].get("kotoba")),
                     ("MT google", stats.get("google")),
-                    ("MT local", stats.get("local"))):
+                    ("MT mlx", stats.get("local"))):
         if v:
             L.append(f"| {name} | {_pct(v, .5):.0f} ms | {_pct(v, .95):.0f} ms |")
     L += [

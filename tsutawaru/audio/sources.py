@@ -62,6 +62,14 @@ class Source:
     # of the list if the first choice stays silent, so an app that moves its audio
     # in an update self-corrects instead of silently capturing nothing.
     roles: tuple[str, ...] = ("audio-service", "renderer", "main")
+    # One voice, or several taking turns. The translator's conversational
+    # context is only true for the first: three prior lines really are the same
+    # speaker on a stream, while a call alternates and tsutawaru has no
+    # diarization, so the same context asserts the wrong person. Measured on
+    # 220 Discord utterances the context made it worse (defects 5 -> 9,
+    # consecutive subject flips 63% -> 80%); on a recorded stream it graded as
+    # the winner. Hence a property of the source rather than a global setting.
+    single_speaker: bool = False
 
 
 SOURCES: dict[str, Source] = {
@@ -72,10 +80,22 @@ SOURCES: dict[str, Source] = {
     "youtube": Source(
         "youtube", "YouTube (Chrome)", ("/Google Chrome.app/", "/Chromium.app/"),
         roles=("audio-service", "renderer", "main"),
+        single_speaker=True,
     ),
 }
 
 DEFAULT_SOURCE = "discord"
+
+
+def single_speaker(key: str) -> bool:
+    """Does this source carry one voice? Unknown sources answer no.
+
+    The conservative direction: a call wrongly treated as a stream gets the
+    wrong speaker asserted into every line, while a stream wrongly treated as a
+    call just loses an improvement.
+    """
+    src = SOURCES.get(key)
+    return bool(src and src.single_speaker)
 
 
 @dataclass(frozen=True)

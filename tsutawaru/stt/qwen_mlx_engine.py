@@ -1,7 +1,7 @@
 """Qwen3-ASR on Apple Silicon via MLX — an opt-in alternative to Whisper.
 
-Nothing here runs unless `stt.model` is set to one of `REPO` below. The default
-is still kotoba-whisper, so this file is inert on an untouched config.
+`stt.model` defaults to "qwen3", so this file is what runs on an untouched
+config. Set it to kotoba/medium/small to go back to Whisper.
 
 Why it exists
 -------------

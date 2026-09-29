@@ -104,7 +104,7 @@ class OnlineTranslator(Translator):
                 log.warning(
                     "%s is refusing requests from this IP (429 CAPTCHA). It "
                     "clears on its own in a few hours; until then run with "
-                    "--provider local for offline translation.", self.name)
+                    "--translator mlx for offline translation.", self.name)
             raise
 
     def batch(self, texts: list[str], remember: bool = True) -> list[str]:

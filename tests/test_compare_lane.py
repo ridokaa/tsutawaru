@@ -310,13 +310,19 @@ def test_hiding_romaji_hides_it_in_both_columns():
 
 
 def test_an_uncompared_line_keeps_the_single_column_layout():
-    """The default path must not grow a table it does not need."""
+    """The default path must not grow the second column it does not need.
+
+    Counted in tables rather than asserting none: every card is a one-row table
+    now, because QTextBrowser will not draw a box any other way. The A/B lane is
+    the *nested* one, so one table is the single-column layout and two is not.
+    """
     from tsutawaru.ui.window_qt import _fmt_block
 
     seg = Segment.new(stream="main", original="海が怖い")
     seg.romaji, seg.english = "umi ga kowai", "the sea is scary"
     html = _fmt_block(seg, Config().ui)
-    assert "<table" not in html
+    assert html.count("<table") == 1
+    assert "abcell" not in html and "abname" not in html
     assert 'class="jp"' in html and 'class="romaji"' in html
 
 

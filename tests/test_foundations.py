@@ -119,7 +119,7 @@ def test_rate_limited_warner_fires_once_then_rearms(caplog):
 def test_defaults_load_without_a_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg = cfgmod.load()
-    assert cfg.stt.model == "kotoba"
+    assert cfg.stt.model == cfgmod.SttCfg().model
     assert cfg.vad.threshold == 0.55
     assert cfg.nlp.agglutinate is True
     assert cfg.source_path is None
@@ -160,7 +160,7 @@ def test_unknown_key_warns_and_is_ignored(tmp_path, monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         cfg = cfgmod.load()
     assert "unknown key" in caplog.text and "mdoel" in caplog.text
-    assert cfg.stt.model == "kotoba"
+    assert cfg.stt.model == cfgmod.SttCfg().model
 
 
 def test_invalid_choice_falls_back_to_default(tmp_path, monkeypatch, caplog):
@@ -168,7 +168,7 @@ def test_invalid_choice_falls_back_to_default(tmp_path, monkeypatch, caplog):
     monkeypatch.chdir(tmp_path)
     with caplog.at_level(logging.WARNING):
         cfg = cfgmod.load()
-    assert cfg.translate.provider == "google"
+    assert cfg.translate.provider == cfgmod.TranslateCfg().provider
 
 
 def test_missing_explicit_config_raises(tmp_path, monkeypatch):

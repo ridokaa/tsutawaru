@@ -7,7 +7,7 @@
 # VAD -> Whisper -> morphology -> romaji -> translation -> console.
 #
 # Usage:  ./tests/manual_smoke.sh [seconds] [extra run.py flags...]
-# Example: ./tests/manual_smoke.sh 60 --provider none --stats
+# Example: ./tests/manual_smoke.sh 60 --translator none --stats
 
 set -uo pipefail
 cd "$(dirname "$0")/.."

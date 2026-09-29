@@ -14,5 +14,5 @@ psutil==7.2.2                    # resolves which child process carries an app's
 # 48 kHz on every chunk, which we then convert again to 16 kHz.
 #   pip install "proc-tap[hq-resample]"
 
-# Offline sentence translation ([translate] provider = "local"). MLX-only.
+# Offline sentence translation ([translate] provider = "mlx"). Apple Silicon.
 mlx-lm==0.31.3

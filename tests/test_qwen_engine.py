@@ -82,12 +82,17 @@ def engine(monkeypatch):
 # ------------------------------------------------------------------ inertness
 
 
-def test_the_default_config_still_builds_whisper():
-    """The revert story: an untouched config never reaches this code path."""
+def test_the_default_config_builds_qwen_and_whisper_is_still_reachable():
+    """Inverted on 2026-09-21: this file used to be inert on an untouched config.
+
+    Whisper is now the opt-in. The second half is the revert story — the Whisper
+    names must keep working, because Qwen3-ASR is Apple-Silicon only.
+    """
     from tsutawaru.stt.qwen_mlx_engine import REPO as QWEN_MODELS
 
-    assert SttCfg().model == "kotoba"
-    assert SttCfg().model not in QWEN_MODELS
+    assert SttCfg().model == "qwen3"
+    assert SttCfg().model in QWEN_MODELS
+    assert load(None, {"stt": {"model": "kotoba"}}).stt.model == "kotoba"
 
 
 def test_the_new_names_are_accepted_by_config():

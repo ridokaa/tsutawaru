@@ -177,6 +177,6 @@ def test_the_failure_names_the_engine_and_says_what_to_do(caplog):
 
     assert "_DeadEngine" in caplog.text
     assert "stopping" in caplog.text
-    assert "--model kotoba" in caplog.text
+    assert "--asr kotoba" in caplog.text
     # The underlying fault has to survive into the log, not just our summary.
     assert "Stream(gpu, 1)" in caplog.text

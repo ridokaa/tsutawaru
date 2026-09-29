@@ -37,14 +37,26 @@ provisional_after_ms = 2500
 
 [stt]
 backend          = "auto"   # "auto" | "mlx" | "faster"
-# tiny | base | small | medium | kotoba
-# "kotoba" is kotoba-whisper-v2.0: Whisper distilled for Japanese on Japanese TV
-# broadcast audio (large-v3 encoder, 2-layer decoder). Measured against "medium"
-# on 80 identical utterances: markedly less fabrication on masked speech, but it
-# truncates some lines and runs ~17% slower here. Its avg_logprob scale differs
-# (mean -0.33 vs -0.59), so logprob_floor below culls far less under it: ~2% of
-# utterances against 15-21% under "medium".
-model            = "kotoba"
+# qwen3 | qwen3-small (Qwen3-ASR, Apple Silicon only) | tiny | base | small |
+# medium | kotoba (Whisper)
+# "qwen3" is Qwen3-ASR-1.7B. Measured on 10.8 h of continuous stream audio,
+# block-scored CER against YouTube captions (experiments/reports/
+# model-bakeoff-20260920.md): it wins every clip and is 16% faster than the
+# "kotoba" it replaced as the default on 2026-09-21.
+#
+#   model         A-chill  B-loud-game  C-collab  D-collab   avg     RTF
+#   qwen3           0.210        0.449     0.429     0.310   0.350   0.128
+#   qwen3-small     0.208        0.459     0.504     0.336   0.377   0.063
+#   kotoba          0.223        0.486     0.562     0.381   0.413   0.153
+#   medium          0.414        0.618     0.673     0.518   0.556   0.135
+#
+# "qwen3-small" is 2x faster for +0.027 CER, nearly all of it on multi-speaker
+# audio — a good trade on solo streams, a poor one on collabs.
+#
+# Qwen3-ASR reports no avg_logprob and no no_speech_prob, so no_speech_thresh
+# and logprob_floor below are INERT under either qwen3 model. Measured cost of
+# losing them: 0.005 CER. They apply again under any Whisper model.
+model            = "qwen3"
 language         = "ja"
 lang_mode        = "pinned" # "pinned" | "detect"
 beam_size        = 1        # greedy = lowest latency
@@ -83,19 +95,38 @@ max_tokens      = 24
 particle_romaji = "hepburn" # "hepburn" (は->wa) | "literal" (は->ha)
 
 [translate]
-# "local" runs the sentence lane on MLX with no network at all (Apple Silicon).
+# "mlx" runs the sentence lane on this machine with no network at all, using
+# local_model below. On the CLI, --translator qwen3.5 names the model directly
+# and sets local_model for you, the way --asr qwen3 does.
 # Glosses come from JMdict for every provider — build it once with:
 #   python -m tsutawaru.translate.jmdict
-provider           = "google"  # "google" | "deepl" | "local" | "none"
+# CLI: --translator qwen3.5|google|deepl|none|mlx. A model name sets
+# local_model too; "mlx" leaves it alone. "local" is the retired spelling of
+# "mlx" and is still accepted.
+#
+# The default became "mlx" on 2026-09-29. Google's free endpoint has refused
+# this machine with a 429 CAPTCHA continuously since 2026-09-20; the block is
+# keyed on the IP and did not clear, so a network default shipped an app that
+# could not translate. "mlx" is offline, Apple Silicon only, and measured at 2
+# objective defects in 320 translations. Set "google" if your IP is clean.
+provider           = "mlx"     # "mlx" | "google" | "deepl" | "none"
 deepl_api_key      = ""
-# 1 objective defect per 120 lines against CAT-Translate-1.4b's 16, for +190 ms
-# and +1.4 GB. Swap in "hotchpotch/CAT-Translate-1.4b-mlx-q4" on a tighter
-# memory budget, or if the ASR is losing utterances to GPU contention.
-local_model        = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
-# Previous Japanese lines given to the translator as context. Off: it does not
-# reduce defects here and turns a garbled ASR line into fluent invention. See
-# tsutawaru/translate/local_mlx.py.
-local_context_lines = 0
+# Measured against Qwen3-4B-Instruct-2507, which it replaces: objective defects
+# 5 -> 1 on a call and 13 -> 3 on a stream, names kept right 2/15 -> 7/15, for
+# ~110 ms a line. A reasoning model — tsutawaru turns thinking off, without which
+# a two-word line takes 15 s.
+# CAT-Translate-1.4b was the budget alternative and was dropped on 2026-09-21:
+# it leaks the prompt back as output under every prompt shape measured, 17-26
+# defective lines per 160 against this model's 2. See local_mlx.REPO.
+local_model        = "mlx-community/Qwen3.5-4B-MLX-4bit"
+# How many lines of previous *English* output to feed the translator back as
+# conversational context, on the sources that warrant it. Whether a source
+# warrants it is decided by audio/sources.py: a YouTube stream is one voice, so
+# the previous lines really are the same speaker; a Discord call alternates and
+# tsutawaru cannot tell who is who, where the same context asserts the wrong
+# person (measured: defects 5 -> 9, subject flips 63% -> 80% on 220 utterances).
+# Set to 0 to disable it on every source.
+local_context_lines = 3
 gloss_workers      = 3         # sentence translation gets its own dedicated worker
 sentence_timeout_s = 4.0
 token_timeout_s    = 3.0

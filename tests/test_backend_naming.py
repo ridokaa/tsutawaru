@@ -119,13 +119,18 @@ def test_online_backend_reports_google_when_deepl_has_no_key():
 
 
 def test_block_header_is_just_the_stream_name():
-    """No backend tag in the transcript — the header stays 'MAIN'."""
-    from tsutawaru.ui.window_qt import _fmt_block
+    """No backend tag in the transcript — the only name shown is the source's.
 
-    html = _fmt_block(
+    The label moved out of the card and onto the source divider (see
+    tests/test_window_cards.py), but the property this guards did not: whichever
+    translator is running must leave no trace in what the reader sees.
+    """
+    from tsutawaru.ui.window_qt import _divider, _fmt_block
+
+    html = _divider("main") + _fmt_block(
         Segment.new(stream="main", original="大事だね!", english="It's important"), UiCfg()
     )
-    assert '<div class="stream">main</div>' in html
+    assert '<div class="divname">main</div>' in html
     for word in ("google", "deepl", "GOOGLE", "·"):
         assert word not in html
 
@@ -139,24 +144,87 @@ def test_retired_provider_is_rejected_on_the_cli():
     value survived into the run and then resolved to whatever the builder
     happened to do with it — the process disagreeing with its own command line.
     """
-    from tsutawaru.config import load
+    from tsutawaru.config import TranslateCfg, load
 
-    assert load(overrides={"translate": {"provider": "marian"}}).translate.provider == "google"
+    # Bound to the default rather than its value: what matters is that a retired
+    # name falls back, not which name it falls back to.
+    assert (load(overrides={"translate": {"provider": "marian"}}).translate.provider
+            == TranslateCfg().provider)
     assert load(overrides={"translate": {"provider": "deepl"}}).translate.provider == "deepl"
 
 
 def test_a_rejected_override_does_not_discard_the_rest(monkeypatch):
     """A bad flag keeps the current value; it must not reset unrelated ones."""
-    from tsutawaru.config import load
+    from tsutawaru.config import TranslateCfg, load
 
     cfg = load(overrides={"translate": {"provider": "marian", "gloss_workers": 7}})
-    assert cfg.translate.provider == "google"
+    assert cfg.translate.provider == TranslateCfg().provider
     assert cfg.translate.gloss_workers == 7
 
 
 def test_choice_checking_applies_to_every_flag_not_just_provider():
-    from tsutawaru.config import load
+    from tsutawaru.config import SttCfg, load
 
-    assert load(overrides={"stt": {"model": "huge"}}).stt.model == "kotoba"
+    # The value is not the point — falling back to whatever the default is, is.
+    assert load(overrides={"stt": {"model": "huge"}}).stt.model == SttCfg().model
     assert load(overrides={"ui": {"sink": "banana"}}).ui.sink == "window"
     assert load(overrides={"stt": {"model": "medium"}}).stt.model == "medium"
+
+
+def test_local_is_rewritten_to_mlx():
+    """`--translator local` and an old config.toml must still work.
+
+    "local" was the original spelling and is kept as an alias, but exactly one
+    of the two may reach the code: `_build_translator`, `validate` and
+    `compare4._mk` all branch on the string, so a surviving "local" would
+    silently take the online path instead of loading MLX.
+    """
+    from tsutawaru.config import load
+
+    assert load(overrides={"translate": {"provider": "local"}}).translate.provider == "mlx"
+    assert load(overrides={"translate": {"provider": "mlx"}}).translate.provider == "mlx"
+    assert load(overrides={"translate": {"provider": "google"}}).translate.provider == "google"
+
+
+def test_a_registry_key_picks_the_model_and_the_backend():
+    """`--translator qwen3.5` must name the model the way `--asr qwen3` does.
+
+    Two things have to happen together: `local_model` becomes the registry's
+    repo, and `provider` becomes "mlx" so `_build_translator` takes the local
+    branch. Setting one without the other either loads the wrong weights or
+    sends the line to Google.
+    """
+    from tsutawaru.config import load
+    from tsutawaru.translate.local_mlx import REPO
+
+    for key, repo in REPO.items():
+        cfg = load(overrides={"translate": {"provider": key}}).translate
+        assert cfg.provider == "mlx", key
+        assert cfg.local_model == repo, key
+
+    # The command line beats a stale local_model in the file, or the run
+    # disagrees with the command that started it.
+    cfg = load(overrides={"translate": {"provider": "qwen3.5",
+                                        "local_model": "someone/else"}}).translate
+    assert cfg.local_model == REPO["qwen3.5"]
+
+    # "mlx" names no model, so it must leave local_model exactly as found.
+    cfg = load(overrides={"translate": {"provider": "mlx",
+                                        "local_model": "someone/else"}}).translate
+    assert cfg.local_model == "someone/else"
+
+
+def test_no_branch_still_tests_for_the_old_spelling():
+    """Nothing may compare against "local" — `load` guarantees it never arrives."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    offenders = []
+    files = list((root / "tsutawaru").rglob("*.py")) + [root / "tools" / "compare4.py"]
+    for f in files:
+        if f.name == "config.py":
+            continue  # the one place that is *allowed* to know the old spelling
+        for i, line in enumerate(f.read_text().splitlines(), 1):
+            if 'provider == "local"' in line or '"local" ==' in line:
+                offenders.append(f"{f.relative_to(root)}:{i}")
+    assert not offenders, offenders

@@ -29,6 +29,24 @@ log = get_logger(__name__)
 WINDOW_TITLE = "tsutawaru"
 POLL_MS = 100          # how often the Qt thread drains ui_q
 STICKY_BOTTOM_PX = 40  # treat "within 40px of the end" as pinned to the bottom
+# How wide the text column is allowed to get, whatever the window does. Measured
+# by reading Qt's wrap points back out of a laid-out segment: the uncapped window
+# put 117 characters on the first English line at its old 860px default and 161
+# on one unbroken line maximised, because the card is width="100%" and so got
+# worse the more screen it was given.
+#
+# Widened from 620 on request — the card read as cramped. Measured across the
+# candidates (English first line / Japanese first line):
+#
+#     620 -> 84 / 29      660 -> 93 / 30      700 -> 99 / 33
+#     640 -> 90 / 30      680 -> 93 / 32      720 -> 102 / 34
+#
+# 660 is three characters past the ~90 where the return sweep starts to degrade,
+# which is the deliberate cost of the extra width; 640 would have held the line
+# but only buys two characters over 620, which is not a visible change. Past 660
+# the gain is all in English while the Japanese tier is the one being read
+# against the audio.
+MAX_TEXT_PX = 660
 # href prefix for the per-word breakdown toggle. Not a real scheme: it never
 # leaves the widget, because setOpenLinks(False) routes every click to us.
 TOK_SCHEME = "tok:"
@@ -37,15 +55,57 @@ TOK_SCHEME = "tok:"
 # as soon as the transcript is trimmed — see set_html().
 ANCHOR_PREFIX = "seg"
 
+# One row, two cells: a 4px accent rail and the body. The rail cell needs both an
+# explicit width and a space inside it — an empty cell collapses to nothing, and a
+# CSS width let it expand and swallow the row. Colour is the only thing that
+# changes between a settled line and one still being spoken.
+RAIL_FINAL = "#3d7dff"
+RAIL_PENDING = "#5a6172"
+CARD_OPEN = (
+    '<table width="100%" cellspacing="0" cellpadding="0" border="0"><tr>'
+    '<td bgcolor="{rail}" width="4"><font size="1">&nbsp;</font></td>'
+    '<td bgcolor="#171a21" style="padding:10px 12px;">'
+)
+CARD_CLOSE = '</td></tr></table><div class="gap">&nbsp;</div>'
+
 _CSS = """
 body { background:#0f1115; color:#e8e8ea;
        font-family:'Hiragino Sans','Yu Gothic UI','Noto Sans JP',sans-serif; }
-.blk    { margin:0 0 14px 0; padding:10px 12px; background:#171a21;
-          border-left:3px solid #3d7dff; border-radius:6px; }
-.blk.pending { border-left-color:#5a6172; }
+/* The tiers that are mostly Latin get a Latin face. Everything inherited the
+   CJK family from body, so the English was being set in Hiragino Sans, whose
+   alphabet is a secondary script: looser, weaker stems, and 8% wider per
+   character than the system text face. 'SF Pro Text' leads the stack for the
+   machines that have it; measured here it is absent from QFontDatabase and the
+   sheet falls through to Helvetica Neue, which is the tightest of the three at
+   6.52px per character. 'Hiragino Sans' stays on the end
+   on purpose — .tok mixes a Japanese surface with romaji and an English gloss on
+   one line, and .en picks up Japanese whenever the translator leaves some in, so
+   naming it keeps those characters in the same face as the .jp tier instead of
+   whatever Qt would otherwise fall back to. */
+.jp     { font-family:'Hiragino Sans','Yu Gothic UI','Noto Sans JP',sans-serif; }
+/* Dimmer than .waiting and italic: a line that will never fill in must not
+   look like one that is about to. */
+.lost   { color:#6b5560; font-style:italic; }
+.en, .romaji, .tok { font-family:'SF Pro Text','Helvetica Neue',Helvetica,Arial,'Hiragino Sans',sans-serif; }
+/* The card is a table, not a styled div, because QTextBrowser paints a block
+   element's background per *paragraph* and ignores borders on divs. Measured on
+   the div markup this replaces: the longest unbroken run of card background down
+   a column was 11px of a 124px block — a stack of stripes with the page showing
+   through every margin — and the border-left was never drawn at all. The same
+   content in a one-row table renders as one solid box. Tables are also what the
+   A/B lane below already relies on. */
+.gap    { font-size:5px; }          /* the space between cards; Qt ignores table margins */
 .stream { color:#7d8595; font-size:11px; text-transform:uppercase;
           letter-spacing:.08em; margin-bottom:6px; }
+/* Source divider. Printed only where consecutive lines disagree about which app
+   they came from, so a mid-session switch is visible exactly where it happened
+   instead of a label repeating on every line that never changes. */
+.divname { color:#7d8595; font-size:11px; text-transform:uppercase;
+           letter-spacing:.08em; margin:10px 0 4px 0; }
 .jp     { font-size:19px; line-height:1.5; margin-bottom:4px; }
+/* Restated rather than inherited from body: once the Latin rule above exists,
+   Qt stops resolving the CJK family through inheritance and the Japanese tier
+   falls back to a generic sans. Measured — it reported "Sans Serif". */
 .romaji { color:#9aa4b8; font-size:13px; font-style:italic; margin-bottom:6px; }
 .en     { color:#8fe3a0; font-size:15px; line-height:1.45; margin-bottom:8px; }
 .tokhdr { margin-top:2px; }
@@ -131,17 +191,24 @@ def _empty_state(device: str, source: str = "") -> str:
     )
 
 
-def _tiers(jp: str, romaji: str, english: str, cfg: UiCfg) -> str:
+def _tiers(jp: str, romaji: str, english: str, cfg: UiCfg,
+           dropped: bool = False) -> str:
     """The JP / romaji / English tiers. One column, or one side of a comparison.
 
     Shared so the two sides of an A/B are identical markup by construction.
+
+    `dropped` separates "still coming" from "never coming". Both used to render
+    as "…", so a line whose closing utterance was evicted under load was
+    indistinguishable from one still in flight and simply sat there.
     """
     esc = html.escape
     wait = '<span class="waiting">…</span>'
+    gone = '<span class="lost">(dropped — pipeline behind)</span>'
     out = [f'<div class="jp">{esc(jp) if jp else wait}</div>']
     if cfg.show_romaji:
         out.append(f'<div class="romaji">{esc(romaji) if romaji else wait}</div>')
-    out.append(f'<div class="en">{esc(english) if english else wait}</div>')
+    en = esc(english) if english else (gone if dropped else wait)
+    out.append(f'<div class="en">{en}</div>')
     return "".join(out)
 
 
@@ -178,18 +245,20 @@ def _fmt_block(seg: Segment, cfg: UiCfg, expanded: bool = False) -> str:
     the word count so there is a reason to open it.
     """
     esc = html.escape
-    pending = " pending" if seg.partial else ""
-    out = [f'<div class="blk{pending}">']
+    rail = RAIL_PENDING if seg.partial else RAIL_FINAL
+    out = [CARD_OPEN.format(rail=rail)]
     # Scroll anchor. Carries no href, so QTextBrowser does not treat it as a
     # hyperlink and the block's own CSS keeps winning — verified: the character
-    # it attaches to stays #e8e8ea with no underline.
+    # it attaches to stays #e8e8ea with no underline. Inside the cell, which the
+    # block walkers in TranscriptWindow handle: QTextBlock.next() iterates blocks
+    # nested in tables too, so the scroll-hold still finds every anchor.
     out.append(f'<a name="{ANCHOR_PREFIX}{seg.id}"></a>')
-    out.append(f'<div class="stream">{esc(seg.stream)}</div>')
 
     if seg.alt_model:
         out.append(_ab_columns(seg, cfg))
     else:
-        out.append(_tiers(seg.original, seg.romaji, seg.english, cfg))
+        out.append(_tiers(seg.original, seg.romaji, seg.english, cfg,
+                          dropped=seg.dropped))
 
     if cfg.show_breakdown and seg.tokens:
         # QTextBrowser has no JavaScript and ignores <details>, so the toggle is
@@ -202,7 +271,7 @@ def _fmt_block(seg: Segment, cfg: UiCfg, expanded: bool = False) -> str:
             f'{caret} {n} word{"" if n == 1 else "s"}</a></div>'
         )
         if not expanded:
-            out.append("</div>")
+            out.append(CARD_CLOSE)
             return "".join(out)
 
         rows = []
@@ -227,8 +296,26 @@ def _fmt_block(seg: Segment, cfg: UiCfg, expanded: bool = False) -> str:
             rows.append(f'<span class="waiting">… (+{seg.truncated} more)</span>')
         out.append('<div class="tok">' + "<br>".join(rows) + "</div>")
 
-    out.append("</div>")
+    out.append(CARD_CLOSE)
     return "".join(out)
+
+
+def _divider(stream: str) -> str:
+    """Mark where the transcript changed source.
+
+    A table rather than a styled div for the same reason the card is one: the
+    rule is a 1px cell with a background, which Qt draws, where a border on a div
+    is silently dropped.
+    """
+    # Label above the rule, not beside it: a two-cell row let the full-width rule
+    # squeeze the label cell down to one character and print the name vertically.
+    return (
+        f'<div class="divname">{html.escape(stream)}</div>'
+        '<table width="100%" cellspacing="0" cellpadding="0" border="0"><tr>'
+        '<td bgcolor="#2a2f3a" style="font-size:2px;">&nbsp;</td>'
+        "</tr></table>"
+        '<div class="gap">&nbsp;</div>'
+    )
 
 
 def _set_macos_app_name(name: str) -> None:
@@ -267,6 +354,35 @@ def sys_platform() -> str:
 try:
     from PyQt6 import QtCore, QtGui, QtWidgets
 
+    class _CappedView(QtWidgets.QTextBrowser):
+        """A transcript view that stops getting wider past MAX_TEXT_PX.
+
+        The cap has to live on the widget. The card is a width="100%" table, and
+        QTextBrowser recomputes document().setTextWidth() from its viewport on
+        every resize, so a width set on the document is overwritten by the next
+        layout pass. Giving the slack to the right margin means a wider window
+        adds margin instead of adding line length.
+
+        Narrower than the cap, `slack` is 0 and this behaves exactly as the plain
+        view did — verified at 500px, where the viewport keeps its natural 476.
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._slack = 0
+
+        def resizeEvent(self, e) -> None:
+            super().resizeEvent(e)
+            # viewport().width() is already reduced by the margin in force, so add
+            # it back to recover the width actually available.
+            slack = max(0, self.viewport().width() + self._slack - MAX_TEXT_PX)
+            if slack != self._slack:
+                # Not optional: setViewportMargins resizes the viewport, which
+                # raises another resizeEvent. Without the guard this recurses
+                # until the stack runs out — it did, on the first attempt.
+                self._slack = slack
+                self.setViewportMargins(0, 0, slack, 0)
+
     class TranscriptWindow(QtWidgets.QMainWindow):
         def __init__(self, cfg: UiCfg, on_close=None, sources=None, on_source=None,
                      current_source: str = "", on_toggle=None, on_refresh=None):
@@ -282,11 +398,14 @@ try:
             self._sources = list(sources or [])
             self._on_source = on_source
             self._src_buttons: dict[str, "QtWidgets.QPushButton"] = {}
-            self.setWindowTitle(WINDOW_TITLE)
-            self.resize(860, 620)
+            self._src_labels = dict(self._sources)
+            self._set_title(current_source)
+            # Sized to the text cap plus chrome, so the window looks right on
+            # launch rather than opening with 240px of dead margin.
+            self.resize(MAX_TEXT_PX + 40, 620)
             self.setMinimumSize(420, 280)
 
-            self.view = QtWidgets.QTextBrowser()
+            self.view = _CappedView()
             self.view.setOpenExternalLinks(False)
             # Breakdown toggles are anchors; without this QTextBrowser tries to
             # navigate to "tok:12" and blanks the transcript.
@@ -338,6 +457,15 @@ try:
             self.setPalette(pal)
 
             self._mk_actions()
+
+        def _set_title(self, key: str) -> None:
+            """Name the source in the title bar, so it is readable at a glance.
+
+            WINDOW_TITLE itself stays bare: it is also the macOS application-menu
+            name via _set_macos_app_name, and that must not gain a suffix.
+            """
+            label = self._src_labels.get(key, "")
+            self.setWindowTitle(f"{WINDOW_TITLE} — {label}" if label else WINDOW_TITLE)
 
         def _mk_source_bar(self, current: str) -> "QtWidgets.QWidget":
             bar = QtWidgets.QWidget()
@@ -408,6 +536,7 @@ try:
             for k, b in self._src_buttons.items():
                 b.setChecked(k == key)
                 b.setEnabled(False)
+            self._set_title(key)
             self.src_note.setText("switching…")
 
             def _work():
@@ -729,11 +858,7 @@ class WindowSink:
             if self._dirty:
                 self._dirty = False
                 keep = win.at_bottom()
-                body = "".join(
-                    _fmt_block(self.segments[i], self.cfg, i in self._expanded)
-                    for i in self.order[-self.cfg.max_lines:]
-                )
-                win.set_html(body, keep)
+                win.set_html(self._transcript_html(), keep)
             win.status.showMessage(self._status())
 
         timer = QtCore.QTimer()
@@ -747,6 +872,23 @@ class WindowSink:
 
         app.exec()
         stop_evt.set()
+
+    def _transcript_html(self) -> str:
+        """The visible lines, with a divider wherever the source changed.
+
+        The label is printed on the boundary rather than on every card: repeated
+        on every line it is noise that never changes, while here its presence is
+        the signal. The first divider always prints, so the transcript still says
+        what it is listening to without anything having to switch.
+        """
+        out, last = [], None
+        for i in self.order[-self.cfg.max_lines:]:
+            seg = self.segments[i]
+            if seg.stream != last:
+                out.append(_divider(seg.stream))
+                last = seg.stream
+            out.append(_fmt_block(seg, self.cfg, i in self._expanded))
+        return "".join(out)
 
     def _drain(self) -> None:
         """Pull every pending event. Batching keeps a burst to one repaint."""
@@ -776,7 +918,10 @@ class WindowSink:
             if self.cfg.log_file and seg.id not in self._logged:
                 seen = self._seen.setdefault(seg.id, set())
                 seen.add(kind)
-                if self._expect.issubset(seen):
+                # A dropped line is complete by definition: the lanes `_expect`
+                # waits for are the ones that will never report. Without this it
+                # is held back forever and the log silently loses the line.
+                if seg.dropped or self._expect.issubset(seen):
                     self._seen.pop(seg.id, None)
                     self._logged.add(seg.id)
                     self._append_log(seg)

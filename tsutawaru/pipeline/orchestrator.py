@@ -316,14 +316,45 @@ class Orchestrator:
             return
         GlossCache = _require("tsutawaru.translate.cache", "GlossCache", "§4 Phase 4a")
         TranslationPool = _require("tsutawaru.translate.pool", "TranslationPool", "§4 Phase 4d")
-        if self.cfg.translate.provider == "local":
+        if self.cfg.translate.provider == "mlx":
             backend_cls = _require("tsutawaru.translate.local_mlx", "LocalTranslator", "§4 Phase 4c")
         else:
             backend_cls = _require("tsutawaru.translate.online", "OnlineTranslator", "§4 Phase 4c")
         backend = backend_cls(self.cfg.translate)
+        self._apply_context(backend)
         cache = GlossCache(self.cfg.translate.lru_size, self.cfg.translate.persist_cache)
         self.stages.translator = backend
         self.stages.pool = TranslationPool(backend, cache, self.cfg.translate)
+
+    def _apply_context(self, backend=None) -> None:
+        """Turn the translator's context on for a one-voice source, off for a call.
+
+        A no-op for backends that do not keep any (the online providers), and
+        for a device-backend run, where `audio.source` names no app and the
+        conservative answer is a call.
+        """
+        backend = backend or getattr(self.stages, "translator", None)
+        setter = getattr(backend, "set_context", None)
+        if setter is None:
+            return
+        from tsutawaru.audio.sources import single_speaker
+
+        setter(single_speaker(self.cfg.audio.source))
+
+    def _stream_name(self) -> str:
+        """What to label this line's transcript with.
+
+        The app being tapped, so a switch mid-session is visible in the window,
+        the log file and the session JSONL — `Utterance.stream` has defaulted to
+        "main" since the field existed, which made every record of a run say the
+        same thing whatever it was listening to. The device backend keeps "main":
+        it captures the whole system mix, so there is no app to name.
+        """
+        if self._backend != "process":
+            return "main"
+        from tsutawaru.audio import sources
+
+        return sources.get(self.cfg.audio.source).label
 
     def _build_ui(self):
         ws_sink = None
@@ -566,7 +597,7 @@ class Orchestrator:
             log.exception(
                 "stt warmup failed (%s) — stopping, nothing this run captures "
                 "could be transcribed. Traceback above is the real fault; "
-                "--model kotoba to keep going without it.",
+                "--asr kotoba to keep going without it.",
                 type(engine).__name__,
             )
             self.stop_evt.set()
@@ -576,6 +607,11 @@ class Orchestrator:
                 utt: Utterance = utt_q.get(timeout=0.2)
             except queue.Empty:
                 continue
+            # Stamped here rather than at capture: this is the one consumer of
+            # utt_q, upstream of both the provisional and the final segment, and
+            # switch_source drains raw_q before it moves cfg.audio.source — so
+            # nothing in flight can be labelled with the app it did not come from.
+            utt.stream = self._stream_name()
             if self.dump_utterances:
                 self._dump(utt)
             t0 = time.perf_counter()
@@ -673,12 +709,35 @@ class Orchestrator:
                               t_audio_end=utt.t_end, t_stt_done=time.monotonic())
             self._provisional[utt.line_id] = seg
             for stale in list(self._provisional)[:-4]:
-                self._provisional.pop(stale, None)
+                self._strand(self._provisional.pop(stale, None))
             self.recorder.add(seg)
         else:
             seg.original, seg.romaji, seg.tokens = text, "", []
         ui_q.put(("new", seg))
         seg_q.put_latest(seg)
+
+    def _strand(self, seg) -> None:
+        """A provisional whose closing utterance never came. Say so on the card.
+
+        This is the one place the loss is knowable: `_emit_segment` pops the
+        entry when the final arrives, so anything still here when a later line
+        pushes it out was evicted from `utt_q` and is never coming. Leaving it
+        alone is what put a permanent "…" under the Japanese, and kept the line
+        out of --log-file entirely — the window waits for `english`, which the
+        sentence lane was never going to send for a provisional.
+        """
+        if seg is None or not seg.provisional:
+            return
+        seg.provisional = False
+        seg.partial = False   # the rail reads settled: nothing more is coming
+        seg.dropped = True
+        # Same counter --stats already prints, so this shows up beside the
+        # filter reasons rather than needing its own reporting path.
+        from tsutawaru.stt.filters import DROPS
+
+        DROPS["stranded"] += 1
+        log.debug("stranded provisional seg %d: %r", seg.id, seg.original)
+        ui_q.put(("dropped", seg))
 
     def _emit_segment(self, utt: Utterance, res):
         from tsutawaru.models import Segment
@@ -854,6 +913,10 @@ class Orchestrator:
                 gate.reset()
 
             self.cfg.audio.source = src.key
+            # Before any audio from the new app can reach the translator: a
+            # call must not inherit a stream's context, and the lines already
+            # held belong to the previous application either way.
+            self._apply_context()
             cap.source = src
             # Start the new app from its own best guess rather than inheriting an
             # escalation that only made sense for the previous one.

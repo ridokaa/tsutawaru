@@ -142,14 +142,21 @@ def main(
         False, "--list-sources", help="List per-process capture sources and exit."),
     source_test: Optional[str] = typer.Option(
         None, "--source-test", help="Tap one source, report levels, and exit."),
+    # Every flag names the stage it belongs to. The old names are kept as
+    # aliases rather than removed: they are in this project's own README, in
+    # tests/manual_smoke.sh and in muscle memory, and an alias costs nothing.
     model: Optional[str] = typer.Option(
-        None, "--model",
-        help="tiny|base|small|medium|kotoba (Japanese-specialised), "
-             "or qwen3|qwen3-small (Qwen3-ASR, Apple Silicon only)."),
+        None, "--asr", "--model",
+        help="Which model listens: qwen3|qwen3-small (Qwen3-ASR, Apple Silicon "
+             "only), or tiny|base|small|medium|kotoba (Whisper)."),
     compare: Optional[str] = typer.Option(
-        None, "--compare",
-        help="Run a second STT model on the same audio and show both (A/B)."),
-    provider: Optional[str] = typer.Option(None, "--provider", help="google|deepl|local|none"),
+        None, "--asr-compare", "--compare",
+        help="Run a second ASR model on the same audio and show both (A/B)."),
+    provider: Optional[str] = typer.Option(
+        None, "--translator", "--provider",
+        help="What turns the Japanese into English: qwen3.5 (on this Mac), "
+             "google|deepl (network), none, or mlx for whatever "
+             "[translate] local_model names."),
     sink: Optional[str] = typer.Option(None, "--sink", help="window|console|overlay|both"),
     ws_port: Optional[int] = typer.Option(None, "--ws-port", help="WebSocket port for the OBS dock."),
     plain: bool = typer.Option(False, "--plain", help="Emit each block once, fully complete."),

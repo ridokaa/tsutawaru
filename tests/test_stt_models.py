@@ -17,8 +17,10 @@ def test_unknown_model_names_are_still_rejected():
     assert cfg.stt.model == SttCfg().model  # fell back to the default
 
 
-def test_default_model_is_unchanged():
-    assert Config().stt.model == "kotoba"
+def test_default_model_is_qwen3():
+    """Changed from "kotoba" on 2026-09-21: qwen3 wins every clip of the 10.8 h
+    corpus and is 16% faster — experiments/reports/model-bakeoff-20260920.md."""
+    assert Config().stt.model == "qwen3"
 
 
 def test_mlx_maps_kotoba_to_the_mlx_build():

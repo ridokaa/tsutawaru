@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from tsutawaru.logbus import get_logger
+# Safe to import at module scope: local_mlx keeps `TranslateCfg` under
+# TYPE_CHECKING and defers mlx-lm to its constructor, so this costs no cycle
+# and no ML stack.
+from tsutawaru.translate.local_mlx import REPO as _TRANSLATOR_REPO
 
 log = get_logger(__name__)
 
@@ -133,7 +137,7 @@ class VadCfg:
 @dataclass
 class SttCfg:
     backend: str = "auto"  # "auto" | "mlx" | "faster"
-    model: str = "kotoba"
+    model: str = "qwen3"
     language: str = "ja"
     lang_mode: str = "pinned"  # "pinned" | "detect"
     beam_size: int = 1
@@ -163,19 +167,35 @@ class NlpCfg:
 
 @dataclass
 class TranslateCfg:
-    provider: str = "google"  # "google" | "deepl" | "local" | "none"
+    # "mlx" runs on this machine; the other two are network calls. "local" is
+    # the old spelling of "mlx" and is still accepted — `load` rewrites it, so
+    # only one of the two ever reaches the code below.
+    # "mlx" since 2026-09-29. Google's free endpoint has refused this machine
+    # with a 429 CAPTCHA continuously since 2026-09-20 — it is keyed on the IP
+    # and did not clear — so the network default shipped an app that could not
+    # translate at all. "mlx" needs no network and is measurably sound: 2
+    # objective defects in 320 translations on the stream corpus. Apple Silicon
+    # only, which `validate` enforces; on other platforms set "google" here.
+    provider: str = "mlx"  # "mlx" | "google" | "deepl" | "none"
     deepl_api_key: str = ""
-    # provider="local" only: the MLX repo for the sentence lane. 4B beat the
-    # 1.4B specialist 1 objective defect to 16 over the same 120 lines; drop to
-    # hotchpotch/CAT-Translate-1.4b-mlx-q4 on a tighter memory budget.
-    local_model: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
-    # Previous Japanese lines fed to the sentence lane as fenced context. Off,
-    # because measured on this project's own data it does not reduce defects (1
-    # at 0 lines against 2 at 3 lines), costs 100 ms, and turns a garbled ASR
-    # line into fluent invention: with nothing translatable in front of it the
-    # model writes a plausible continuation of the *context* instead. See
-    # local_mlx.py. Raise it only with a model of ~4B or larger and clean input.
-    local_context_lines: int = 0
+    # provider="mlx" only: the MLX repo for the sentence lane. Measured on 100
+    # lines of each corpus against Qwen3-4B-Instruct-2507, which it replaces:
+    # objective defects 5 -> 1 on a call and 13 -> 3 on a stream, and names kept
+    # right 2/15 -> 7/15. Costs ~110 ms a line and slightly less memory.
+    #
+    # It is a reasoning model. `LocalTranslator._chat` turns that off, and must:
+    # left on, a two-word line takes 15 s and returns an essay about its own
+    # thinking. Any replacement needs the same check.
+    local_model: str = "mlx-community/Qwen3.5-4B-MLX-4bit"
+    # How many lines of previous *English* output to feed back as conversational
+    # context — when the capture source warrants it at all. That decision is not
+    # here: `sources.single_speaker` makes it, because context is only true for
+    # one voice. A stream gets it, a call does not. 0 disables it everywhere.
+    #
+    # Measured on 220 Discord utterances it made things worse (defects 5 -> 9,
+    # consecutive subject flips 63% -> 80%); on a recorded YouTube stream it was
+    # graded the winner 19-16. Costs ~90 ms on the lines that use it.
+    local_context_lines: int = 3
     gloss_workers: int = 3  # sentence translation gets its own dedicated worker
     sentence_timeout_s: float = 4.0
     token_timeout_s: float = 3.0
@@ -235,11 +255,11 @@ class Config:
             errs.append("[translate] gloss_workers must be at least 1")
         if self.translate.provider == "deepl" and not self.translate.deepl_api_key:
             errs.append("[translate] provider is 'deepl' but deepl_api_key is empty")
-        if self.translate.provider == "local" and sys.platform != "darwin":
+        if self.translate.provider == "mlx" and sys.platform != "darwin":
             # Same rule as the qwen3 STT models: an MLX-only path names its
             # requirement rather than quietly running something else.
             errs.append(
-                f"[translate] provider 'local' is MLX-only (Apple Silicon); "
+                f"[translate] provider 'mlx' is Apple Silicon only; "
                 f"this is {sys.platform} — use 'google' or 'deepl'"
             )
         if self.audio.backend == "process":
@@ -306,7 +326,12 @@ _CHOICES = {
     ("stt", "lang_mode"): {"pinned", "detect"},
     ("nlp", "tokenizer"): {"janome", "mecab", "unidic"},
     ("nlp", "particle_romaji"): {"hepburn", "literal"},
-    ("translate", "provider"): {"google", "deepl", "local", "none"},
+    # A registry key (qwen3.5) names a local model the way `--asr qwen3`
+    # does; "mlx" runs whatever `local_model` points at. "local" is the retired
+    # spelling of "mlx" — `load` rewrites both to "mlx" immediately afterwards,
+    # so only one string ever reaches a branch.
+    ("translate", "provider"): ({"mlx", "google", "deepl", "none", "local"}
+                                | set(_TRANSLATOR_REPO)),
     ("ui", "sink"): {"window", "console", "overlay", "both"},
 }
 # Same names as `model`, plus "" for off. Derived so the two cannot drift.
@@ -424,5 +449,20 @@ def load(path: str | None = None, overrides: dict[str, dict[str, Any]] | None = 
                 )
                 continue
             setattr(section, key, val)
+
+    # One canonical spelling reaches the rest of the codebase, resolved after
+    # the overrides so a config.toml and a CLI flag are both covered.
+    #
+    # A registry key is the interesting case: `--translator qwen3.5` names the
+    # model, exactly as `--asr qwen3` does, and picks the repo. It wins over
+    # `local_model` deliberately — naming a model on the command line has to
+    # beat a stale line in config.toml, or the run disagrees with the command
+    # that started it. `--translator mlx` names no model and so changes nothing.
+    repo = _TRANSLATOR_REPO.get(cfg.translate.provider)
+    if repo:
+        cfg.translate.local_model = repo
+        cfg.translate.provider = "mlx"
+    elif cfg.translate.provider == "local":
+        cfg.translate.provider = "mlx"  # retired spelling
 
     return cfg

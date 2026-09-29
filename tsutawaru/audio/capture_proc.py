@@ -84,6 +84,10 @@ class ProcessCapture:
         # process opens cleanly and then delivers nothing, so "which pid" cannot be
         # settled at build time — only by trying.
         self.candidate = 0
+        # How far the blind scan has walked, which is not the same thing: the scan
+        # returns to candidate 0 between steps, so `candidate` alternates while
+        # this only ever moves outward. See advance_candidate.
+        self._probe = 0
 
     # `Capture` exposes the device it is reading; the orchestrator logs this and
     # the UI shows it. For a process tap the equivalent is app + pid.
@@ -109,19 +113,41 @@ class ProcessCapture:
         return self
 
     def advance_candidate(self) -> str:
-        """Give up on the current process and prefer the next one.
+        """Give up on the current process and try the next place audio could be.
 
         Called when a tap has been open and silent for a while. This is the only
         way to recover from tapping the wrong process, because that failure is
         indistinguishable from "the app is quiet" at the Core Audio level: measured
         on this machine, Discord's audio.mojom.AudioService accepts a tap and
         returns 0 bytes while its renderer returns real audio.
+
+        The scan alternates 1, 0, 2, 0, 3, 0 … rather than walking straight down
+        the list, because that same ambiguity cuts the other way at startup. Start
+        tsutawaru before the video and every candidate is silent, so the scan walks
+        off candidate 0 — the best guess, and for Chrome the only process that ever
+        carries audio — purely because nothing was playing yet. A straight scan
+        cannot return to it for a full lap: Chrome was offering 25 tappable
+        processes when this was measured, which at PROC_ESCALATE_S is 18.75
+        minutes of reading nothing after the user finally presses play. Returning
+        home every other step bounds that at two steps while still visiting every
+        candidate, which Discord needs — its audio is on a renderer, not on the
+        process its name would suggest.
+
+        Nothing moves when the app is not running at all. `self.candidate += 1`
+        before the lookup used to run the counter away at 20 steps a minute while
+        `resolve` had nothing to return (the escalation path fires on the 3 s
+        retap tick, not the 45 s one, when `start()` raises and the silence clock
+        is therefore never reset), so launching the app afterwards landed on an
+        arbitrary index instead of on the best guess.
         """
-        self.candidate += 1
+        want = 0 if self.candidate else self._probe + 1
         try:
-            nxt = resolve(self.source, self.candidate)
+            nxt = resolve(self.source, want)
         except Exception:
             return "no other candidate"
+        self.candidate = want
+        if want:
+            self._probe = want
         return f"{nxt.kind} (pid {nxt.pid})"
 
     def _tap_alive(self) -> bool:

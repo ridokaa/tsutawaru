@@ -88,6 +88,12 @@ class Segment:
     # when the utterance closes. Never translated: half a sentence is exactly
     # what the sentence lane cannot render honestly.
     provisional: bool = False
+    # A provisional line whose final utterance never arrived — `utt_q` is
+    # drop-oldest (maxsize=8), so under sustained load the closing utterance can
+    # be evicted before STT reads it. The preview is then on screen for good,
+    # and without this flag it sits at "…" forever and is never written to
+    # --log-file, because the window waits for lanes that will never report.
+    dropped: bool = False
     continued: bool = False  # follows a forced flush — same speaker turn
     t_audio_end: float = 0.0
     t_stt_done: float = 0.0
@@ -143,6 +149,7 @@ class Segment:
             "en": self.english,
             "lang": self.lang,
             "partial": self.partial,
+            "dropped": self.dropped,
             "continued": self.continued,
             "truncated": self.truncated,
             # Whisper's avg_logprob. Carried on Segment since the STT stage was

@@ -75,3 +75,66 @@ def test_unconfirmed_tap_waits_out_the_grace_period():
 def test_escalation_threshold_survives_a_conversational_pause():
     """12 s was inside the range of a normal group-call pause. 45 s is not."""
     assert PROC_ESCALATE_S >= 30.0
+
+
+# --- the startup search itself -------------------------------------------------
+#
+# The complaint these cover: "tsutawaru won't read anything if I run it before
+# YouTube." Nothing was wrong with the tap — the blind scan had walked off the
+# audio-service while Chrome sat idle, and with 25 tappable Chrome processes it
+# could not get back for 18.75 minutes.
+
+from tsutawaru.audio.capture_proc import ProcessCapture
+from tsutawaru.audio.sources import SOURCES, Resolved, SourceUnavailable
+
+
+def _capture(monkeypatch, n_candidates: int) -> ProcessCapture:
+    """A capture whose source offers `n_candidates` pids. 0 = app not running."""
+    src = SOURCES["youtube"]
+
+    def fake_resolve(source, index=0):
+        if not n_candidates:
+            raise SourceUnavailable(source, "the application is not running")
+        i = index % n_candidates
+        return Resolved(1000 + i, "audio-service" if i == 0 else "renderer", source)
+
+    monkeypatch.setattr("tsutawaru.audio.capture_proc.resolve", fake_resolve)
+    return ProcessCapture(src)
+
+
+def test_scan_returns_to_the_best_guess_every_other_step(monkeypatch):
+    """Chrome's audio-service is candidate 0 and the only pid that ever plays."""
+    cap = _capture(monkeypatch, 25)
+    walked = [cap.candidate]
+    for _ in range(8):
+        cap.advance_candidate()
+        walked.append(cap.candidate)
+
+    assert walked == [0, 1, 0, 2, 0, 3, 0, 4, 0], walked
+
+
+def test_scan_still_reaches_every_candidate(monkeypatch):
+    """Discord's audio is on a renderer, so the far end of the list is load-bearing."""
+    # % 4 because `resolve` is what maps the counter onto the list, and it wraps;
+    # `start()` hands it the raw value the same way.
+    cap = _capture(monkeypatch, 4)
+    seen = {cap.candidate}
+    for _ in range(12):
+        cap.advance_candidate()
+        seen.add(cap.candidate % 4)
+
+    assert seen == {0, 1, 2, 3}, seen
+
+
+def test_counter_does_not_run_away_while_the_app_is_closed(monkeypatch):
+    """Absent app -> escalation fires every 3 s, not every 45. It must be inert.
+
+    The bumped-then-looked-up version left the index at ~200 after ten minutes,
+    so opening Chrome afterwards tapped 200 % 25 — an arbitrary renderer.
+    """
+    cap = _capture(monkeypatch, 0)
+    for _ in range(200):
+        assert cap.advance_candidate() == "no other candidate"
+
+    assert cap.candidate == 0, "must still open on the best guess"
+    assert cap._probe == 0

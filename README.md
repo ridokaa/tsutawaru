@@ -6,7 +6,7 @@ Open-source, native, low-latency live Japanese → English audio translation wit
 
 Built to follow Japanese friends in Discord voice calls in real time, and to learn the language while doing so — which is why the romaji and per-token gloss tiers are core rather than decorative. A pure captioning tool would show you the English and stop. The end goal is to stop needing this one.
 
-> Previously named `kotoba-live` (renamed 2026-08-18). `kotoba-tech/kotoba-whisper` is an established Japanese ASR model family — one this project can now load with `--model kotoba` — so the old name collided with a dependency inside its own CLI. Any `kotoba` still in this repository refers to that model, never to the project.
+> Previously named `kotoba-live` (renamed 2026-08-18). `kotoba-tech/kotoba-whisper` is an established Japanese ASR model family — one this project can now load with `--asr kotoba` — so the old name collided with a dependency inside its own CLI. Any `kotoba` still in this repository refers to that model, never to the project.
 
 ## Key Features
 
@@ -61,7 +61,7 @@ python run.py --audio-test --device "BlackHole" --seconds 5
 
 ```bash
 # macOS: tap Discord (per-process capture is the default)
-python run.py --source discord --model kotoba
+python run.py --source discord --asr kotoba
 
 # Force the device path, or run on Windows/Linux
 python run.py --audio-backend device --device "BlackHole"
@@ -101,17 +101,14 @@ transcript rather than on their own.
 
 | Tier | Default | Fully offline |
 |---|---|---|
-| Sentence | Google (`--provider google`) | `--provider local` — CAT-Translate-1.4b on MLX |
+| Sentence | Google (`--translator google`) | `--translator qwen3.5` — Qwen3.5-4B on MLX |
 | Breakdown | JMdict, then the sentence provider for what it lacks | JMdict alone |
 
-`--provider local` needs `mlx-lm` and Apple Silicon; it downloads
-`hotchpotch/CAT-Translate-1.4b-mlx-q4` (~0.9 GB) on first run. Measured on the
-40-line 20260822 session corpus, M5 Air 16 GB: sentence p50 122 ms / p95 301 ms,
-breakdown p50 31 ms, 1.66 GB peak RSS. JMdict answers 96.7% of breakdown tokens,
-so with `local` a call runs with the network unplugged.
-
-Set `[translate] local_model = "hotchpotch/CAT-Translate-0.8b-mlx-q4"` for a
-smaller memory footprint.
+`--translator qwen3.5` needs `mlx-lm` and Apple Silicon; it downloads
+`mlx-community/Qwen3.5-4B-MLX-4bit` on first run. Measured on 160 lines of
+stream audio, M5 Air 16 GB: sentence p50 552 ms / p95 1246 ms, 2 objective
+defects. JMdict answers 96.7% of breakdown tokens, so with `mlx` a call runs
+with the network unplugged.
 
 ## Audio Capture
 
