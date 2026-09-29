@@ -79,6 +79,17 @@ CARD_OPEN = (
     '<td bgcolor="#171a21" style="padding:10px 12px;">'
 )
 CARD_CLOSE = '</td></tr></table><div class="gap">&nbsp;</div>'
+# Closing a card that the next one continues. The VAD's max-length flush cuts a
+# long turn mid-sentence and emits the halves as separate lines, each of which
+# then gets its own translation of half a sentence. Dropping the gap butts the
+# two tables together, so the body and the accent rail run straight through and
+# the halves read as the one utterance they are.
+#
+# Direction matters and the field name does not state it: `continued` is set
+# from `utt.forced` on the utterance the flush *truncated*, so it marks the
+# FIRST half and the remainder is the following line. Confirmed against the
+# recorded sessions — every marked line ends mid-word (…まあゆ, …予約の).
+CARD_CLOSE_JOINED = "</td></tr></table>"
 
 _CSS = """
 body { background:#0f1115; color:#e8e8ea;
@@ -139,6 +150,11 @@ body { background:#0f1115; color:#e8e8ea;
 .en.shaky { color:#6f8f78; }
 .shakytag { color:#b08050; font-size:10.5px; text-transform:uppercase;
             letter-spacing:.08em; margin-bottom:3px; }
+/* The back half of a turn the VAD cut at max length. Its English translates a
+   fragment, which is worth saying on the line itself: the flush join above it
+   says the same thing, but only while both halves are in the same widget. */
+.contfrom { color:#7d8595; font-size:11px; letter-spacing:.04em;
+            margin-bottom:4px; }
 /* The A/B lane, two columns of equal weight. A <table> because QTextBrowser
    renders a subset of HTML 4 with no flex layout, but solid table support.
    Equal weight is deliberate: dimming the comparison biases reading toward the
@@ -288,15 +304,22 @@ def _ab_columns(seg: Segment, cfg: UiCfg) -> str:
     )
 
 
-def _fmt_block(seg: Segment, cfg: UiCfg, expanded: bool = False) -> str:
+def _fmt_block(seg: Segment, cfg: UiCfg, expanded: bool = False,
+               joined_below: bool = False, continues_above: bool = False) -> str:
     """Render one segment. `expanded` controls the per-word breakdown.
 
     The breakdown is collapsed by default: on a long sentence it pushed the
     English translation off the top of the view, so reading a line meant
     scrolling back up for it. It is now behind a click, and the header states
     the word count so there is a reason to open it.
+
+    `joined_below` closes the card flush against the next one — see
+    CARD_CLOSE_JOINED — and `continues_above` marks it as the back half of a cut
+    turn. The caller owns both because they are facts about the *pair*, and a
+    segment cannot see its neighbours.
     """
     esc = html.escape
+    close = CARD_CLOSE_JOINED if joined_below else CARD_CLOSE
     rail = RAIL_PENDING if seg.partial else RAIL_FINAL
     out = [CARD_OPEN.format(rail=rail)]
     # Scroll anchor. Carries no href, so QTextBrowser does not treat it as a
@@ -305,6 +328,8 @@ def _fmt_block(seg: Segment, cfg: UiCfg, expanded: bool = False) -> str:
     # block walkers in TranscriptWindow handle: QTextBlock.next() iterates blocks
     # nested in tables too, so the scroll-hold still finds every anchor.
     out.append(f'<a name="{ANCHOR_PREFIX}{seg.id}"></a>')
+    if continues_above:
+        out.append('<div class="contfrom">↳ continued</div>')
 
     if seg.alt_model:
         out.append(_ab_columns(seg, cfg))
@@ -323,7 +348,7 @@ def _fmt_block(seg: Segment, cfg: UiCfg, expanded: bool = False) -> str:
             f'{caret} {n} word{"" if n == 1 else "s"}</a></div>'
         )
         if not expanded:
-            out.append(CARD_CLOSE)
+            out.append(close)
             return "".join(out)
 
         rows = []
@@ -348,7 +373,7 @@ def _fmt_block(seg: Segment, cfg: UiCfg, expanded: bool = False) -> str:
             rows.append(f'<span class="waiting">… (+{seg.truncated} more)</span>')
         out.append('<div class="tok">' + "<br>".join(rows) + "</div>")
 
-    out.append(CARD_CLOSE)
+    out.append(close)
     return "".join(out)
 
 
@@ -434,6 +459,13 @@ try:
                 # until the stack runs out — it did, on the first attempt.
                 self._slack = slack
                 self.setViewportMargins(0, 0, slack, 0)
+            # Re-assert the text width against the viewport we ended up with.
+            # super() sets it from the viewport as it was on entry, and when the
+            # slack does not change there is no second resizeEvent to correct it
+            # — so a vertical scrollbar appearing or disappearing left the
+            # document 16px wider than the viewport and raised a *horizontal*
+            # scrollbar across a transcript that wraps and never needed one.
+            self.document().setTextWidth(self.viewport().width())
 
     class TranscriptWindow(QtWidgets.QMainWindow):
         def __init__(self, cfg: UiCfg, on_close=None, sources=None, on_source=None,
@@ -734,6 +766,10 @@ try:
 
             Guarded on a real change: setFixedHeight relays out the document,
             which re-emits documentSizeChanged straight back here.
+
+            Deliberately not pinned to the bottom. The only thing that outgrows
+            the clamp is an opened breakdown, and its top — the Japanese being
+            read — is the part worth keeping in view.
             """
             # Chrome is measured, not assumed: Qt folds the stylesheet padding
             # into frameWidth, so a hardcoded constant was one pixel short and
@@ -1051,23 +1087,54 @@ class WindowSink:
         if not self.order:
             return _empty_state(self.device_name, self.current_source)
         out, last = [], None
-        # The last line is excluded: it lives in the live lane. Slicing rather
-        # than special-casing keeps `max_lines` meaning the same thing, and an
-        # order of length 1 correctly yields an empty history.
-        for i in self.order[-self.cfg.max_lines:-1]:
-            seg = self.segments[i]
+        # The last line is excluded: it lives in the live lane. Positions rather
+        # than ids, because a card has to know its neighbours and looking those
+        # up by id would scan `order` once per line on every repaint.
+        first = max(0, len(self.order) - self.cfg.max_lines)
+        for pos in range(first, len(self.order) - 1):
+            seg = self.segments[self.order[pos]]
             if seg.stream != last:
                 out.append(_divider(seg.stream))
                 last = seg.stream
-            out.append(_fmt_block(seg, self.cfg, i in self._expanded))
+            out.append(self._card(pos))
         return "".join(out)
+
+    def _card(self, pos: int) -> str:
+        """One segment, placed against its neighbours.
+
+        `continued` marks the line the VAD's max-length flush *truncated*, so a
+        pair hangs together on the earlier line's flag: the flagged line is the
+        front half and the line after it carries the rest.
+
+        Both halves are marked, and deliberately not by the same means. Closing
+        the front half flush against the back one is what makes them read as one
+        utterance, but it only works while both are in the same widget — the live
+        lane is a separate view, and a reader scrolled up has the two nowhere
+        near each other. The marker on the back half survives both.
+        """
+        i = self.order[pos]
+        seg = self.segments[i]
+
+        def _same_turn(other_pos: int) -> bool:
+            # A pair cannot span a source switch: the divider would land inside
+            # the joined card, and the halves are not one utterance anyway.
+            if not 0 <= other_pos < len(self.order):
+                return False
+            return self.segments[self.order[other_pos]].stream == seg.stream
+
+        joined = bool(seg.continued and _same_turn(pos + 1))
+        follows = bool(
+            pos and self.segments[self.order[pos - 1]].continued
+            and _same_turn(pos - 1)
+        )
+        return _fmt_block(seg, self.cfg, i in self._expanded,
+                          joined_below=joined, continues_above=follows)
 
     def _live_html(self) -> str:
         """The newest segment, for the fixed lane. Empty when there is none."""
         if not self.order:
             return ""
-        i = self.order[-1]
-        return _fmt_block(self.segments[i], self.cfg, i in self._expanded)
+        return self._card(len(self.order) - 1)
 
     def _drain(self) -> None:
         """Pull every pending event. Batching keeps a burst to one repaint."""
