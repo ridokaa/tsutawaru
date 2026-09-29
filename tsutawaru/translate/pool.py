@@ -89,6 +89,11 @@ class TranslationPool:
             seg.english = f"[translation unavailable: {type(e).__name__}]"
         metrics.record("xlate_sentence", (time.perf_counter() - t0) * 1000)
         ui_q.put(("english", seg))
+        if not seg.english:
+            # The backend returned nothing: a guard in local_mlx rejected the
+            # output, or there was nothing translatable. Either way no English
+            # is coming, and "…" would claim otherwise.
+            seg.dropped = True
         if completes:
             # Glosses stay None rather than "": the breakdown renders None as
             # "…" (not looked up) and "" as "?" (looked up, nothing found), and

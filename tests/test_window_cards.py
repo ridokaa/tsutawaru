@@ -246,7 +246,7 @@ def test_a_stranded_provisional_says_so_instead_of_waiting_forever(qapp):
     assert ui_q.get_nowait()[0] == "dropped", "the window is never told"
 
     html = _fmt_block(live, cfg)
-    assert 'class="lost"' in html and "dropped" in html
+    assert 'class="lost"' in html and "no translation" in html
     assert 'class="waiting"' not in html.split('class="en"')[1], \
         "the English tier still reads as pending"
 
@@ -278,3 +278,24 @@ def test_a_stranded_line_still_reaches_the_log_file(qapp, tmp_path):
 
     assert seg.id in sink._logged, "a dropped line never got written"
     assert "ねこ" in log.read_text(encoding="utf-8")
+
+
+def test_a_declined_translation_settles_instead_of_reading_as_pending(qapp):
+    """The translator's guards return "" for a line they reject. Without the
+    marker that renders as "…", which is what a line still in flight renders —
+    the same ambiguity the stranded-provisional fix exists to remove."""
+    from tsutawaru.translate.pool import TranslationPool
+
+    seg = Segment.new(stream="t", original="Ｘ Ｙ Ｚ。", romaji="X Y Z")
+    seg.english = ""
+
+    pool = TranslationPool.__new__(TranslationPool)
+    pool.backend = type("B", (), {"sentence": staticmethod(lambda t: "")})()
+    from tsutawaru.pipeline.queues import ui_q
+    while not ui_q.empty():
+        ui_q.get_nowait()
+    pool._sentence(seg, completes=True)
+
+    assert seg.dropped, "a declined line still claims to be pending"
+    assert not seg.partial
+    assert "no translation" in _fmt_block(seg, UiCfg())

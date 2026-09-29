@@ -203,7 +203,7 @@ def _tiers(jp: str, romaji: str, english: str, cfg: UiCfg,
     """
     esc = html.escape
     wait = '<span class="waiting">…</span>'
-    gone = '<span class="lost">(dropped — pipeline behind)</span>'
+    gone = '<span class="lost">(no translation)</span>'
     out = [f'<div class="jp">{esc(jp) if jp else wait}</div>']
     if cfg.show_romaji:
         out.append(f'<div class="romaji">{esc(romaji) if romaji else wait}</div>')

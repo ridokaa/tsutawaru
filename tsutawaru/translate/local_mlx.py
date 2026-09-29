@@ -46,6 +46,7 @@ on the GPU would take time away from this one and from the ASR (see
 from __future__ import annotations
 
 import collections
+import re
 import threading
 
 from typing import TYPE_CHECKING
@@ -110,9 +111,35 @@ NAME_RULE = (
     "romanize and hyphenate to the honorific rather than translating."
 )
 
+# Qwen3-ASR ends 95.5% of its lines in "。" where the human captions of the same
+# audio end 61.4%, so most of those stops are the ASR's formatting habit rather
+# than something the speaker signalled — and the translator reads one as a
+# declarative cue and re-reads the whole sentence as a statement. Measured on
+# 124 lines the captions confirm are questions and Qwen3-ASR flattened:
+#
+#   as-is                                   38/124 questions survived  (30.6%)
+#   trailing "。" stripped                   52/124                     (41.9%)
+#   this rule, "。" left on                  56/124                     (45.2%)
+#   both (shipped)                          68/124                     (54.8%)
+#   "。" replaced with "？" — oracle, for scale  122/124                (98.4%)
+#
+# The oracle arm is the ceiling and is not reachable: it used caption knowledge
+# tsutawaru does not have at runtime. What the numbers understate is the cost —
+# restoring the mark changed the *words*, not just the punctuation, on 101 of
+# those 124 lines: これちょっと高くない went from "This is a little
+# expensive." to "Isn't this a bit expensive?". Flattening does not drop a
+# question mark, it answers the question wrongly.
+#
+# Measured on the bare prompt. The context prompt carries it for consistency and
+# was not separately measured.
+INTENT_RULE = (
+    " Keep the speaker's intent in the punctuation: end a question with '?' and "
+    "an emphatic line with '!', even when the Japanese ends in a plain full stop."
+)
+
 PROMPT = (
     "Translate the following Japanese text into English. " + NAME_RULE +
-    "\n\n {src}"
+    INTENT_RULE + "\n\n {src}"
 )
 
 # The fence and the "do not translate" are both load-bearing. An unfenced
@@ -123,7 +150,8 @@ CONTEXT_PROMPT = (
     "The conversation so far, already translated:\n{ctx}\n\n"
     "Translate the next Japanese line into English, consistent with what came "
     "before — especially who is being talked about, since Japanese usually "
-    "leaves the subject unsaid. " + NAME_RULE + " Output the English only."
+    "leaves the subject unsaid. " + NAME_RULE + INTENT_RULE +
+    " Output the English only."
     "\n\n {src}"
 )
 
@@ -131,6 +159,75 @@ CONTEXT_PROMPT = (
 # but it is a runaway guard, not a budget: a repetition loop on garbled ASR input
 # is the only thing that ever reaches it.
 MAX_TOKENS = 256
+
+
+# A generated translation that fell into a repetition loop. The character n-gram
+# test in stt/filters.py cannot see this one: it asks whether the first few
+# characters repeat back to back, which catches ああああ and misses a four-
+# sentence block repeated eight times until MAX_TOKENS cuts it off.
+#
+# The discriminator is not "is there repetition" — Japanese speech repeats, and
+# 痛い痛い痛い really does translate to "It hurts. It hurts. It hurts." It is how
+# much of the output is new: a loop says almost nothing new, a speaker saying a
+# thing twice still says plenty. Tuned against the 960 translations in the
+# bake-off, where these thresholds fire on 0 of them and catch the observed
+# runaway with room on every axis.
+LOOP_MIN_CHARS = 200
+LOOP_MIN_PARTS = 6
+LOOP_MAX_UNIQUE = 0.5
+_SENT_SPLIT = re.compile(r'(?<=[.!?])\s+')
+
+
+def _looped(text: str) -> bool:
+    """Whether generation degenerated into repeating itself."""
+    if len(text) <= LOOP_MIN_CHARS:
+        return False
+    parts = [p.strip().lower().rstrip(".!?") for p in _SENT_SPLIT.split(text.strip())]
+    parts = [p for p in parts if p]
+    if len(parts) < LOOP_MIN_PARTS:
+        return False
+    return len(set(parts)) / len(parts) < LOOP_MAX_UNIQUE
+
+
+def _undupe(text: str) -> str:
+    """Keep the output up to the point the loop started, drop the rest.
+
+    Truncating rather than blanking: what comes before the first repeat is the
+    model's actual attempt, and showing one wrong line beats showing none.
+    """
+    seen, out = set(), []
+    for part in _SENT_SPLIT.split(text.strip()):
+        key = part.strip().lower().rstrip(".!?")
+        if key and key in seen:
+            break
+        if key:
+            seen.add(key)
+        out.append(part)
+    return " ".join(out).strip()
+
+
+# The loop guard above catches a runaway once it is repeating. It does not catch
+# the thing that starts one: handed a line with nothing translatable in it, the
+# model emits the *context* back — the failure local_mlx has warned about since
+# context was introduced. Observed with a three-letter line the ASR produced
+# from noise, against three lines of history,
+# where the output was all three previous translations verbatim plus one
+# invention, 141 characters, under every loop threshold, and was then remembered
+# so the next three lines inherited it.
+#
+# Two whole previous lines reappearing word for word is not a coincidence, which
+# is what makes this safe to act on: one recurring short line can happen when a
+# speaker repeats themselves, two cannot.
+ECHO_MIN_LINES = 2
+
+
+def _echoes_context(text: str, history) -> bool:
+    """Whether the output is the conversation context handed back."""
+    if not history:
+        return False
+    body = text.strip()
+    hits = sum(1 for h in history if h.strip() and h.strip() in body)
+    return hits >= ECHO_MIN_LINES
 
 
 def _prompt(text: str, history) -> str:
@@ -241,7 +338,12 @@ class LocalTranslator(Translator):
             return ""
         from mlx_lm import generate
 
-        msg = [{"role": "user", "content": _prompt(text, self.history)}]
+        # The ASR's trailing "。" is a formatting habit, not a signal from the
+        # speaker, and the translator treats it as one — see INTENT_RULE. Only
+        # the text handed to the model is trimmed; `seg.original` still shows
+        # what was transcribed.
+        src = text[:-1] if text.endswith("。") else text
+        msg = [{"role": "user", "content": _prompt(src, self.history)}]
         with self.lock:
             prompt = self._chat(msg)
             out = generate(
@@ -249,6 +351,29 @@ class LocalTranslator(Translator):
                 max_tokens=MAX_TOKENS, sampler=self.sampler, verbose=False,
             )
             out = out.strip()
+            if _echoes_context(out, self.history):
+                from tsutawaru.stt.filters import DROPS
+
+                DROPS["mt-echo"] += 1
+                log.warning(
+                    "[translate] context echoed back for %r — dropped", text[:40])
+                # Nothing is the honest answer: there was nothing to translate,
+                # and repeating the previous lines reads as new speech. Not
+                # remembered, or the echo becomes the next line's context.
+                return ""
+            if _looped(out):
+                # Counted under the same counter --stats prints for the ASR
+                # filters, so a run that produces these says so at exit.
+                from tsutawaru.stt.filters import DROPS
+
+                DROPS["mt-loop"] += 1
+                log.warning("[translate] repetition loop on %r — truncated", text[:40])
+                out = _undupe(out)
+                # Deliberately not remembered even when asked. `history` feeds
+                # the next three lines, and a loop in it is how one bad line
+                # becomes four: with nothing translatable in front of it the
+                # model continues the context instead.
+                return out
             if remember:
                 # The English, not the Japanese. See `_prompt`.
                 self.history.append(out)
@@ -303,5 +428,35 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.local_ml
     t.history = collections.deque(maxlen=0)  # local_context_lines = 0
     _gen("x", "X.")
     assert not t.history and _prompt("y", t.history) == PROMPT.format(src="y")
+
+    # --- the trailing stop the ASR adds, and the loop it helps produce -------
+    assert INTENT_RULE in PROMPT and INTENT_RULE in CONTEXT_PROMPT
+    # The strip is on the model's input only; nothing here may touch the display
+    # text, which is why it lives in `sentence` and not in `_prompt`.
+    assert "。" in _prompt("ねこ。", []), "_prompt must not strip — sentence() does"
+
+    loop = ("The bus was late again. Yes, that's right. I think it starts "
+            "raining around four. Probably. ") * 8
+    assert _looped(loop), "the observed runaway is not caught"
+    assert _undupe(loop).count("The bus") == 1, "truncation left the loop in"
+    assert len(_undupe(loop)) < len(loop) / 4
+    # Speech repeats. 痛い痛い痛い is not a defect and must survive intact.
+    for ok in ("It hurts. It hurts. It hurts. I really messed up.",
+               "Thirty. Thirty.", "Who's there? Who? Who? Hana-chan."):
+        assert not _looped(ok), f"false positive on {ok!r}"
+        assert _undupe(ok) == ok or not _looped(ok)
+    # Long but informative: length alone must not trip it.
+    assert not _looped(". ".join(f"Sentence number {i}" for i in range(40)))
+
+    # The observed 141-char case: under every loop threshold, caught here.
+    hist = ["The bus was late again.", "Yes, that's right.",
+            "I think it starts raining around four. Probably."]
+    echo = "\n".join(hist) + "\n\nI'm not sure if I should have said that."
+    assert not _looped(echo), "this is the case the loop guard cannot see"
+    assert _echoes_context(echo, hist), "context echo went undetected"
+    assert not _echoes_context("The cat sat on the roof.", hist)
+    # A speaker repeating one line must not look like an echo.
+    assert not _echoes_context(hist[1], hist), "one line is a coincidence"
+    assert not _echoes_context(echo, []), "no context, nothing to echo"
 
     print("local_mlx self-check OK")

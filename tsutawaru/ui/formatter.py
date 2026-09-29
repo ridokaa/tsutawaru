@@ -31,7 +31,7 @@ def render_block(seg: Segment, cfg: UiCfg) -> str:
     # Same distinction the window makes: "…" is still coming, the marker is
     # never coming. The log file is read after the fact, where a bare "…" is
     # indistinguishable from a line that was simply cut off at exit.
-    _en = seg.english or ("(dropped — pipeline behind)" if seg.dropped else "…")
+    _en = seg.english or ("(no translation)" if seg.dropped else "…")
     lines.append(f"3. English (Full) : {_en}")
     if seg.alt_model:
         # Indented, never renumbered into the tiers: those are the product,

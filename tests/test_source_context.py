@@ -87,3 +87,19 @@ def test_apply_context_is_a_noop_for_a_backend_without_one():
     o = _orch("youtube")
     o.stages.translator = object()
     o._apply_context()      # must not raise
+
+
+def test_the_local_mlx_self_check_still_passes():
+    """Nothing in the suite ran the module self-checks, so the assertions in
+    local_mlx.__main__ — prompt shape, context hygiene, and the repetition
+    guard tuned against the bake-off — could rot unnoticed. One test, because
+    that file already keeps its own checks next to the code they describe.
+    """
+    import runpy
+
+    # run_path, not run_module: the module is already imported by this suite and
+    # run_module would re-execute it into a second copy, which warns and can
+    # diverge from the one under test.
+    import tsutawaru.translate.local_mlx as m
+
+    runpy.run_path(m.__file__, run_name="__main__")
