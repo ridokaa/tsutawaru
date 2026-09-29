@@ -24,6 +24,22 @@ source        = "discord"   # backend="process" only: "discord" | "youtube"
 [vad]
 backend            = "silero"   # "silero" | "webrtc"  (webrtc needs Python 3.11)
 threshold          = 0.55       # silero speech probability
+# Used instead of `threshold` while the gate judges the background noisy. Loud
+# game audio does not make Silero say "silence" behind a voice — it makes it say
+# "maybe", and 0.55 then discards the maybes. Measured over 20 minutes of each
+# corpus clip, the fraction of windows scoring 0.1-0.5 is what separates them:
+#
+#   clip                windows 0.1-0.5   speech missed @0.55
+#   quiet solo stream         5.7%               0.5%
+#   loud game stream         26.6%              29.0%
+#   multi-speaker collab      6.7%               0.3%
+#   large collab              7.6%               0.6%
+#
+# Above 15% of windows ambiguous the gate switches to this value and logs it;
+# below 10% it switches back. On the loud clip 0.30 cuts misses 29.0% -> 18.5%
+# and costs false positives 24.4% -> 37.7%. Set this equal to `threshold` to
+# turn the behaviour off entirely.
+threshold_noisy    = 0.30
 aggressiveness     = 2          # webrtc 0..3
 preroll_ms         = 320        # rounded to whole 32 ms windows
 hangover_ms        = 448        # rounded to whole 32 ms windows
@@ -44,11 +60,11 @@ backend          = "auto"   # "auto" | "mlx" | "faster"
 # model-bakeoff-20260920.md): it wins every clip and is 16% faster than the
 # "kotoba" it replaced as the default on 2026-09-21.
 #
-#   model         A-chill  B-loud-game  C-collab  D-collab   avg     RTF
-#   qwen3           0.210        0.449     0.429     0.310   0.350   0.128
-#   qwen3-small     0.208        0.459     0.504     0.336   0.377   0.063
-#   kotoba          0.223        0.486     0.562     0.381   0.413   0.153
-#   medium          0.414        0.618     0.673     0.518   0.556   0.135
+#   model         quiet  loud-game  collab  big-collab    avg     RTF
+#   qwen3         0.210      0.449   0.429       0.310   0.350   0.128
+#   qwen3-small   0.208      0.459   0.504       0.336   0.377   0.063
+#   kotoba        0.223      0.486   0.562       0.381   0.413   0.153
+#   medium        0.414      0.618   0.673       0.518   0.556   0.135
 #
 # "qwen3-small" is 2x faster for +0.027 CER, nearly all of it on multi-speaker
 # audio — a good trade on solo streams, a poor one on collabs.
