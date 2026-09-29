@@ -132,9 +132,14 @@ NAME_RULE = (
 #
 # Measured on the bare prompt. The context prompt carries it for consistency and
 # was not separately measured.
+# Questions only. A first version asked for '!' on emphatic lines too and put an
+# exclamation mark on 24.2% of a 120-line stream sample against a baseline of
+# 0.0% — "The item is!", "we have balloons, after all!". Japanese marks a
+# question lexically (か, ない, でしょう) so there is something for the model to
+# key on; emphasis has no such marker, and asked for it the model invents one.
 INTENT_RULE = (
-    " Keep the speaker's intent in the punctuation: end a question with '?' and "
-    "an emphatic line with '!', even when the Japanese ends in a plain full stop."
+    " Keep the speaker's intent in the punctuation: end a question with '?', "
+    "even when the Japanese ends in a plain full stop."
 )
 
 PROMPT = (
@@ -215,19 +220,57 @@ def _undupe(text: str) -> str:
 # invention, 141 characters, under every loop threshold, and was then remembered
 # so the next three lines inherited it.
 #
-# Two whole previous lines reappearing word for word is not a coincidence, which
-# is what makes this safe to act on: one recurring short line can happen when a
-# speaker repeats themselves, two cannot.
+# Two whole previous lines reappearing word for word is not a coincidence — but
+# the first version of this did not test that, and blanked 3.3% of good lines on
+# a 120-line stream sample against a baseline of 0.0%. Two defects:
+#
+#   history holds duplicates, so a speaker repeating a filler put the same
+#   English in twice and one match counted as two hits;
+#   a bare substring test matched "No." or "Ah." inside any ordinary sentence.
+#
+# Distinct entries only, and long ones only. Length in *words*: a four-word
+# phrase reappearing verbatim inside a different line is the signal, where a
+# character count only says the line was long. The observed failure echoed a
+# 7-word line and a 12-word line and still fires; "Come on.", "Yes, that's
+# right." and "Okay," no longer can.
 ECHO_MIN_LINES = 2
+ECHO_MIN_WORDS = 4
 
 
 def _echoes_context(text: str, history) -> bool:
     """Whether the output is the conversation context handed back."""
-    if not history:
-        return False
     body = text.strip()
-    hits = sum(1 for h in history if h.strip() and h.strip() in body)
-    return hits >= ECHO_MIN_LINES
+    if not body or not history:
+        return False
+    substantial = {h.strip() for h in history
+                   if len(h.split()) >= ECHO_MIN_WORDS}
+    return sum(1 for h in substantial if h in body) >= ECHO_MIN_LINES
+
+
+def _strip_echo(text: str, history) -> str:
+    """Remove the echoed context and keep whatever the model actually added.
+
+    Blanking the line was wrong: in every observed case the real translation is
+    at the *end*, after the context the model recited first —
+
+        "The bus was late again. I think it starts raining around four.
+         Probably. It ended there."
+         ^ two previous lines, recited     ^ the actual answer
+
+    so throwing the whole output away loses a correct translation. Every part
+    is compared against the full history here, not only the substantial lines:
+    `_echoes_context` has already established this output is an echo, so a
+    short previous line appearing in it is no longer a coincidence.
+    """
+    body = text.strip()
+    # Longest first, so a short line nested inside a longer one cannot punch a
+    # hole in it and leave the remainder unmatchable. Substring removal rather
+    # than splitting into sentences: a remembered line is often two sentences,
+    # and splitting would never match it as a unit.
+    for h in sorted({h.strip() for h in history if h.strip()},
+                    key=len, reverse=True):
+        body = body.replace(h, " ")
+    return " ".join(body.split())
 
 
 def _prompt(text: str, history) -> str:
@@ -355,12 +398,17 @@ class LocalTranslator(Translator):
                 from tsutawaru.stt.filters import DROPS
 
                 DROPS["mt-echo"] += 1
-                log.warning(
-                    "[translate] context echoed back for %r — dropped", text[:40])
-                # Nothing is the honest answer: there was nothing to translate,
-                # and repeating the previous lines reads as new speech. Not
-                # remembered, or the echo becomes the next line's context.
-                return ""
+                # `_undupe` unconditionally, not behind `_looped`: inside this
+                # branch the output is already known bad, and what survives the
+                # strip is often one sentence said twice — too short to reach
+                # the loop thresholds, which exist to protect healthy output.
+                out = _undupe(_strip_echo(out, self.history))
+                log.warning("[translate] context echoed back for %r — kept %r",
+                            text[:40], out[:60] or "(nothing)")
+                # Never remembered, salvaged or not: an output that recited the
+                # context once will do it again from the same context, and
+                # that is how one bad line becomes four.
+                return out
             if _looped(out):
                 # Counted under the same counter --stats prints for the ASR
                 # filters, so a run that produces these says so at exit.
@@ -458,5 +506,30 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.local_ml
     # A speaker repeating one line must not look like an echo.
     assert not _echoes_context(hist[1], hist), "one line is a coincidence"
     assert not _echoes_context(echo, []), "no context, nothing to echo"
+    # The four shapes that made the first version blank good lines. Every one
+    # of these came out of a real stream, and each returned True.
+    assert not _echoes_context("Come on.", ["Come on.", "Come on.", "Right."]), \
+        "duplicate history entries counted twice"
+    assert not _echoes_context("No. Okay, so the item is here.", ["No.", "Okay,"]), \
+        "short filler matched as a substring"
+    assert not _echoes_context("Yeah.", ["Yeah.", "Yeah."]), \
+        "a repeated utterance is not an echo"
+    assert not _echoes_context("Ah. Mou. That was close.", ["Ah.", "Mou."])
+    # The rule only says what it says with '!' gone: see INTENT_RULE.
+    assert "'?'" in INTENT_RULE and "'!'" not in INTENT_RULE
+
+    # Salvage, not blank: the real translation follows the recited context.
+    recited = hist[0] + " " + hist[2] + " It ended there."
+    assert _echoes_context(recited, hist)
+    kept = _strip_echo(recited, hist)
+    assert kept == "It ended there.", kept
+    # Newline-separated echoes, and a line the model ended with a comma.
+    nl = "\n".join([hist[0], "Two hundred of them,", hist[2], "So that was that."])
+    assert _strip_echo(nl, hist + ["Two hundred of them,"]) == "So that was that."
+    # A remembered line that is itself two sentences must go as one unit.
+    assert _strip_echo(hist[2] + " And then we left.", hist) == "And then we left."
+
+    # Nothing added at all is still possible, and must come back empty.
+    assert _strip_echo("\n".join(hist), hist) == ""
 
     print("local_mlx self-check OK")
