@@ -157,3 +157,8 @@ show_romaji    = true
 show_breakdown = true
 plain          = false
 log_file       = ""
+# Lines the ASR scored below this are dimmed and tagged "unsure" rather than
+# shown as confidently as a clean one. Above [stt].logprob_floor (-1.0), which
+# drops a line outright — this is the band that is worth reading but not
+# trusting. INERT under model="qwen3": it reports no avg_logprob.
+confidence_floor = -0.6

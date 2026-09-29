@@ -219,6 +219,17 @@ class UiCfg:
     show_breakdown: bool = True
     plain: bool = False
     log_file: str = ""
+    # avg_logprob below which a line is rendered as untrusted — dimmed, with an
+    # "unsure" tag. A fluent English tier under a garbled transcript launders the
+    # ASR's noise, and nothing on screen said which lines to distrust.
+    #
+    # Distinct from [stt].logprob_floor, which *discards* a line: this is the
+    # weaker band above it, where the transcript is worth showing but not worth
+    # believing. Keep it above that floor or it can never fire.
+    #
+    # Per-model and per-mic — retune when you swap backends. INERT under either
+    # qwen3 model, which reports no avg_logprob at all (see [stt].model).
+    confidence_floor: float = -0.6
 
 
 @dataclass

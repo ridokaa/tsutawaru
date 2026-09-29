@@ -47,6 +47,18 @@ STICKY_BOTTOM_PX = 40  # treat "within 40px of the end" as pinned to the bottom
 # the gain is all in English while the Japanese tier is the one being read
 # against the audio.
 MAX_TEXT_PX = 660
+# The live lane: the newest segment, held still below the scrollback instead of
+# sliding up its bottom edge. Both bounds are widget heights, measured by laying
+# real cards out at the text cap and adding the lane's own 25px of chrome — one
+# JP line 157, two 200, +29 for a collapsed breakdown header, ~490 with it open.
+#
+# The minimum is a one-line card, so every ordinary utterance renders at exactly
+# the floor and the lane holds still across the whole provisional -> final ->
+# next-line cycle; only a genuine second line of Japanese moves it. The maximum
+# clears two JP lines plus the breakdown header, and leaves an opened breakdown
+# to scroll inside the lane rather than eat half the window.
+LIVE_MIN_PX = 160
+LIVE_MAX_PX = 240
 # href prefix for the per-word breakdown toggle. Not a real scheme: it never
 # leaves the widget, because setOpenLinks(False) routes every click to us.
 TOK_SCHEME = "tok:"
@@ -117,6 +129,16 @@ body { background:#0f1115; color:#e8e8ea;
 .tgloss { color:#e0b978; }
 .tinfl  { color:#7f9bd0; font-size:11.5px; }
 .waiting{ color:#5a6172; }
+/* A line the ASR scored below [ui].confidence_floor. Multi-class selectors work
+   in QTextDocument's CSS subset — verified: `.jp.shaky` overrides the colour and
+   still inherits the 19px from `.jp`. Dimmed rather than hidden, because the
+   reader needs to know something was said there; the English is dimmed too,
+   since its fluency is exactly what makes a garbled transcript look reliable.
+   The tag carries the meaning — grey alone reads as styling, not as doubt. */
+.jp.shaky { color:#98999f; }
+.en.shaky { color:#6f8f78; }
+.shakytag { color:#b08050; font-size:10.5px; text-transform:uppercase;
+            letter-spacing:.08em; margin-bottom:3px; }
 /* The A/B lane, two columns of equal weight. A <table> because QTextBrowser
    renders a subset of HTML 4 with no flex layout, but solid table support.
    Equal weight is deliberate: dimming the comparison biases reading toward the
@@ -191,8 +213,29 @@ def _empty_state(device: str, source: str = "") -> str:
     )
 
 
+def _untrusted(seg: Segment, cfg: UiCfg) -> bool:
+    """True when the ASR itself scored this line below the floor.
+
+    Two exclusions, both to stop the tag crying wolf:
+
+      confidence == 0.0 is Segment's "engine reported nothing" marker, not a
+      great score — treating it as one would tag every line under qwen3, which
+      reports no avg_logprob at all.
+
+      A provisional line is a prefix of speech still in progress. Cutting an
+      utterance mid-word costs logprob on its own, so those score worse as a
+      class and would be tagged wholesale for a reason that says nothing about
+      whether the words are right.
+    """
+    return (
+        not seg.provisional
+        and seg.confidence != 0.0
+        and seg.confidence < cfg.confidence_floor
+    )
+
+
 def _tiers(jp: str, romaji: str, english: str, cfg: UiCfg,
-           dropped: bool = False) -> str:
+           dropped: bool = False, shaky: bool = False) -> str:
     """The JP / romaji / English tiers. One column, or one side of a comparison.
 
     Shared so the two sides of an A/B are identical markup by construction.
@@ -200,15 +243,21 @@ def _tiers(jp: str, romaji: str, english: str, cfg: UiCfg,
     `dropped` separates "still coming" from "never coming". Both used to render
     as "…", so a line whose closing utterance was evicted under load was
     indistinguishable from one still in flight and simply sat there.
+
+    `shaky` marks a line the ASR scored badly — see `_untrusted`.
     """
     esc = html.escape
     wait = '<span class="waiting">…</span>'
     gone = '<span class="lost">(no translation)</span>'
-    out = [f'<div class="jp">{esc(jp) if jp else wait}</div>']
+    dim = " shaky" if shaky else ""
+    out = []
+    if shaky:
+        out.append('<div class="shakytag">unsure</div>')
+    out.append(f'<div class="jp{dim}">{esc(jp) if jp else wait}</div>')
     if cfg.show_romaji:
         out.append(f'<div class="romaji">{esc(romaji) if romaji else wait}</div>')
     en = esc(english) if english else (gone if dropped else wait)
-    out.append(f'<div class="en">{en}</div>')
+    out.append(f'<div class="en{dim}">{en}</div>')
     return "".join(out)
 
 
@@ -220,7 +269,10 @@ def _ab_columns(seg: Segment, cfg: UiCfg) -> str:
     read harder still.
     """
     esc = html.escape
-    left = _tiers(seg.original, seg.romaji, seg.english, cfg)
+    # Only the left side can be scored: `confidence` belongs to `original`, and
+    # the comparison engine's own logprob is never carried on the Segment.
+    left = _tiers(seg.original, seg.romaji, seg.english, cfg,
+                  shaky=_untrusted(seg, cfg))
     right = _tiers(seg.alt_original, seg.alt_romaji, seg.alt_english, cfg)
     # `model` is only set while comparing, so fall back to the stream name
     # rather than printing an empty header over the live transcript.
@@ -258,7 +310,7 @@ def _fmt_block(seg: Segment, cfg: UiCfg, expanded: bool = False) -> str:
         out.append(_ab_columns(seg, cfg))
     else:
         out.append(_tiers(seg.original, seg.romaji, seg.english, cfg,
-                          dropped=seg.dropped))
+                          dropped=seg.dropped, shaky=_untrusted(seg, cfg)))
 
     if cfg.show_breakdown and seg.tokens:
         # QTextBrowser has no JavaScript and ignores <details>, so the toggle is
@@ -385,7 +437,8 @@ try:
 
     class TranscriptWindow(QtWidgets.QMainWindow):
         def __init__(self, cfg: UiCfg, on_close=None, sources=None, on_source=None,
-                     current_source: str = "", on_toggle=None, on_refresh=None):
+                     current_source: str = "", on_toggle=None, on_refresh=None,
+                     on_clear=None):
             super().__init__()
             self.cfg = cfg
             self._on_close = on_close
@@ -395,14 +448,20 @@ try:
             # change would not show until the next line arrived — which during a
             # quiet moment reads as the button not working.
             self._on_refresh = on_refresh
+            # View > Clear used to call view.clear(), which emptied the widget but
+            # not the sink's `order`/`segments` — so the next arriving line
+            # re-rendered the entire history back. Clearing is the sink's to do.
+            self._on_clear = on_clear
             self._sources = list(sources or [])
             self._on_source = on_source
             self._src_buttons: dict[str, "QtWidgets.QPushButton"] = {}
             self._src_labels = dict(self._sources)
             self._set_title(current_source)
             # Sized to the text cap plus chrome, so the window looks right on
-            # launch rather than opening with 240px of dead margin.
-            self.resize(MAX_TEXT_PX + 40, 620)
+            # launch rather than opening with 240px of dead margin. Taller than
+            # the old 620 because the live lane now takes up to LIVE_MAX_PX of it
+            # and the scrollback was left with under 300px.
+            self.resize(MAX_TEXT_PX + 40, 760)
             self.setMinimumSize(420, 280)
 
             self.view = _CappedView()
@@ -436,15 +495,39 @@ try:
                 "QTextBrowser{background:#0f1115;border:none;padding:12px;}"
             )
 
-            # Transcript fills the window; the control bar sits under it. The
-            # bar is always built now that it carries the breakdown toggle — the
-            # source half of it is what stays conditional, since on the device
-            # backend there is nothing to switch between.
+            # The live lane. The newest segment is the only one still changing
+            # and the only one being read against the audio, and at the bottom of
+            # a growing scrollback it moves twice — as it grows, and again as the
+            # next line arrives. Here it has a fixed home.
+            #
+            # Its own view, not a pinned block in the transcript: a second
+            # QTextBrowser is the whole mechanism, where keeping one document
+            # would mean re-deriving "the bottom" on every incremental layout
+            # pass, which is the thing `_pin_bottom` exists to fight.
+            self.live = _CappedView()
+            self.live.setOpenExternalLinks(False)
+            self.live.setOpenLinks(False)
+            self.live.anchorClicked.connect(self._on_anchor)
+            self.live.document().setDefaultStyleSheet(_CSS)
+            self.live.setStyleSheet(
+                "QTextBrowser{background:#0f1115;border:none;"
+                "border-top:1px solid #242936;padding:12px;}"
+            )
+            self.live.document().documentLayout().documentSizeChanged.connect(
+                self._fit_live
+            )
+            self.live.hide()  # nothing live until the first segment lands
+
+            # Transcript fills the window; the live lane and the control bar sit
+            # under it. The bar is always built now that it carries the breakdown
+            # toggle — the source half of it is what stays conditional, since on
+            # the device backend there is nothing to switch between.
             central = QtWidgets.QWidget()
             col = QtWidgets.QVBoxLayout(central)
             col.setContentsMargins(0, 0, 0, 0)
             col.setSpacing(0)
             col.addWidget(self.view, 1)
+            col.addWidget(self.live, 0)
             col.addWidget(self._mk_source_bar(current_source), 0)
             self.setCentralWidget(central)
 
@@ -580,7 +663,7 @@ try:
 
             m.addSeparator()
             clear = QtGui.QAction("Clear", self, shortcut="Ctrl+K")
-            clear.triggered.connect(self.view.clear)
+            clear.triggered.connect(self._clear)
             m.addAction(clear)
 
             if not (self._sources and self._on_source is not None):
@@ -611,6 +694,55 @@ try:
                     self._on_toggle(int(href[len(TOK_SCHEME):]))
                 except ValueError:  # pragma: no cover - defensive
                     pass
+
+        def _clear(self) -> None:
+            """Drop the transcript for real, including the live lane."""
+            self.view.clear()
+            self.live.clear()
+            self.live.hide()
+            if self._on_clear is not None:
+                self._on_clear()
+
+        def has_selection(self) -> bool:
+            """True while the reader is holding selected text in either pane.
+
+            set_html() replaces the document, which destroys any selection and the
+            caret with it — so at a 100ms poll the transcript was uncopyable
+            during speech, which is when there is something worth copying. The
+            sink stops rebuilding while this is true.
+
+            Both panes answer one question on purpose. Gating them separately
+            would advance the live lane past a stale scrollback, and the segment
+            in between — the one that just stopped being newest — would be in
+            neither for as long as the selection was held.
+            """
+            return (self.view.textCursor().hasSelection()
+                    or self.live.textCursor().hasSelection())
+
+        def set_live(self, body: str) -> None:
+            """Replace the live lane. Empty body hides it."""
+            if not body:
+                self.live.clear()
+                self.live.hide()
+                return
+            self.live.setHtml(f"<body>{body}</body>")
+            self.live.show()
+            self._fit_live()
+
+        def _fit_live(self, _size=None) -> None:
+            """Size the lane to its card, clamped.
+
+            Guarded on a real change: setFixedHeight relays out the document,
+            which re-emits documentSizeChanged straight back here.
+            """
+            # Chrome is measured, not assumed: Qt folds the stylesheet padding
+            # into frameWidth, so a hardcoded constant was one pixel short and
+            # the lane carried a permanent scrollbar over content that fit.
+            chrome = max(0, self.live.height() - self.live.viewport().height())
+            want = round(self.live.document().size().height()) + chrome
+            want = max(LIVE_MIN_PX, min(LIVE_MAX_PX, want))
+            if want != self.live.height():
+                self.live.setFixedHeight(want)
 
         def at_bottom(self) -> bool:
             sb = self.view.verticalScrollBar()
@@ -843,7 +975,7 @@ class WindowSink:
         win = TranscriptWindow(
             self.cfg, on_close=stop_evt.set, sources=self.sources,
             on_source=self.on_source, current_source=self.current_source,
-            on_toggle=_toggle, on_refresh=_refresh,
+            on_toggle=_toggle, on_refresh=_refresh, on_clear=self.clear,
         )
         win.set_html(_empty_state(self.device_name, self.current_source), True)
         win.show()
@@ -854,12 +986,7 @@ class WindowSink:
             if stop_evt.is_set():
                 app.quit()
                 return
-            self._drain()
-            if self._dirty:
-                self._dirty = False
-                keep = win.at_bottom()
-                win.set_html(self._transcript_html(), keep)
-            win.status.showMessage(self._status())
+            self.tick(win)
 
         timer = QtCore.QTimer()
         timer.timeout.connect(tick)
@@ -873,22 +1000,74 @@ class WindowSink:
         app.exec()
         stop_evt.set()
 
+    def clear(self) -> None:
+        """Drop the held transcript. Wired to View > Clear.
+
+        `_logged`/`_seen` are deliberately kept: they guard --log-file against
+        writing a line twice, and clearing the view must not make the file gain
+        duplicates. `_seen_total` is a session count, not a count of what is
+        currently on screen.
+        """
+        self.segments.clear()
+        self.order.clear()
+        self._expanded.clear()
+        self._backfilled.clear()
+        self._dirty = True
+
+    def tick(self, win) -> None:
+        """One poll: drain the queue, repaint if anything changed.
+
+        A method rather than a closure in `run` so it can be driven from a test
+        without a running event loop.
+        """
+        self._drain()
+        # A held selection freezes both panes. `_dirty` stays set, so the moment
+        # the reader deselects, one rebuild catches up on everything that arrived
+        # meanwhile — nothing is dropped, only deferred.
+        frozen = win.has_selection()
+        if self._dirty and not frozen:
+            self._dirty = False
+            keep = win.at_bottom()
+            win.set_html(self._transcript_html(), keep)
+            win.set_live(self._live_html())
+        # Say so, or a frozen transcript reads as a hung one.
+        win.status.showMessage(
+            "paused — text selected (⌘C to copy, click to resume)"
+            if frozen else self._status()
+        )
+
     def _transcript_html(self) -> str:
-        """The visible lines, with a divider wherever the source changed.
+        """The history pane: every visible line except the newest, which the live
+        lane owns. Falls back to the empty state when there is nothing at all, so
+        View > Clear lands back on the listening hint rather than a blank page.
+
+        Dividers mark wherever the source changed.
 
         The label is printed on the boundary rather than on every card: repeated
         on every line it is noise that never changes, while here its presence is
         the signal. The first divider always prints, so the transcript still says
         what it is listening to without anything having to switch.
         """
+        if not self.order:
+            return _empty_state(self.device_name, self.current_source)
         out, last = [], None
-        for i in self.order[-self.cfg.max_lines:]:
+        # The last line is excluded: it lives in the live lane. Slicing rather
+        # than special-casing keeps `max_lines` meaning the same thing, and an
+        # order of length 1 correctly yields an empty history.
+        for i in self.order[-self.cfg.max_lines:-1]:
             seg = self.segments[i]
             if seg.stream != last:
                 out.append(_divider(seg.stream))
                 last = seg.stream
             out.append(_fmt_block(seg, self.cfg, i in self._expanded))
         return "".join(out)
+
+    def _live_html(self) -> str:
+        """The newest segment, for the fixed lane. Empty when there is none."""
+        if not self.order:
+            return ""
+        i = self.order[-1]
+        return _fmt_block(self.segments[i], self.cfg, i in self._expanded)
 
     def _drain(self) -> None:
         """Pull every pending event. Batching keeps a burst to one repaint."""
