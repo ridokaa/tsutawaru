@@ -1,9 +1,15 @@
 """Offline sentence translation on MLX (Apple Silicon).
 
-`mlx-community/Qwen3-4B-Instruct-2507-4bit` is the shipped model, run one line at
-a time with no context. Measured on 120 lines of tsutawaru-20260904-183501.jsonl,
-M5 Air 16 GB, 4-bit, counting only objective defects (Japanese left in the
-English, length blowup, glued words, empty output, degenerate repetition):
+The shipped model is `translate.local_model`, which has been
+`mlx-community/Qwen3.5-4B-MLX-4bit` since 2026-09-21.
+
+The tables below are the measurements that shaped this lane, not a description of
+what runs: they were taken on the two models Qwen3.5 replaced
+(Qwen3-4B-Instruct-2507 and CAT-Translate-1.4b), neither of which is selectable
+any more. They are kept because they are why the lane is built this way.
+Measured on 120 lines of one recorded session, M5 Air 16 GB, 4-bit, counting
+only objective defects (Japanese left in the English, length blowup, glued
+words, empty output, degenerate repetition):
 
     CAT-Translate-1.4b   bare        16 defects   p50 147 ms
     Qwen3-4B             +3 lines     2 defects   p50 429 ms
