@@ -54,7 +54,7 @@ provisional_after_ms = 2500
 [stt]
 backend          = "auto"   # "auto" | "mlx" | "faster"
 # qwen3 | qwen3-small (Qwen3-ASR, Apple Silicon only) | tiny | base | small |
-# medium | kotoba (Whisper)
+# medium | kotoba | turbo (Whisper)
 # "qwen3" is Qwen3-ASR-1.7B. Measured on 10.8 h of continuous stream audio,
 # block-scored CER against YouTube captions (experiments/reports/
 # model-bakeoff-20260920.md): it wins every clip and is 16% faster than the
@@ -68,6 +68,12 @@ backend          = "auto"   # "auto" | "mlx" | "faster"
 #
 # "qwen3-small" is 2x faster for +0.027 CER, nearly all of it on multi-speaker
 # audio — a good trade on solo streams, a poor one on collabs.
+#
+# "turbo" is large-v3-turbo and was measured on 2026-09-30 to settle whether a
+# general-trained large-v3 beats the Japanese-distilled "kotoba" built on the
+# same encoder. It does not: it lost on all four clips and ran away on the loud
+# one, averaging 0.720 against qwen3's 0.336 in a single run of all three arms.
+# See mlx_whisper_engine.REPO for the table. It is selectable, not recommended.
 #
 # Qwen3-ASR reports no avg_logprob and no no_speech_prob, so no_speech_thresh
 # and logprob_floor below are INERT under either qwen3 model. Measured cost of

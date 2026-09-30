@@ -26,6 +26,38 @@ REPO = {
     # utterances under 'medium' but only ~2% under this, so switching quietly
     # changes how much speech is discarded before it ever reaches you.
     "kotoba": "kaiinui/kotoba-whisper-v2.0-mlx",
+    # large-v3's encoder with a 4-layer decoder, 809M params. Here to isolate the
+    # one variable "kotoba" confounds: kotoba is this same encoder distilled on
+    # ReazonSpeech, which is Japanese TV *read* speech, while this project only
+    # ever sees spontaneous conversation. Same front end, general training, and a
+    # decoder deep enough not to give up early the way kotoba's 2-layer one does.
+    #
+    # q4 (464 MB) rather than the 8-bit or fp16 conversions, which ship
+    # safetensors that this mlx_whisper cannot load ("[load_npz] Input must be a
+    # zip file"). It is the same format and size class as "medium" above, so the
+    # two are directly comparable; an 8-bit arm remains untested.
+    #
+    # MEASURED AND REJECTED, 2026-09-30. Block-scored CER over the same
+    # contiguous 10-minute window of each corpus clip, all three arms in one run:
+    #
+    #   model     quiet  loud-game  collab  big-collab    avg     RTF
+    #   qwen3     0.161      0.497   0.366      0.318   0.336   0.109
+    #   kotoba    0.159      0.494   0.557      0.417   0.406   0.153
+    #   turbo     0.171      1.235   0.734      0.739   0.720   0.123
+    #
+    # It loses on all four clips, including the quiet solo stream it was expected
+    # to win. On the loud clip it emits 1.69x the reference length (1943 chars
+    # against 1148) — a CER above 1.0 is insertion, not substitution, which is
+    # the Whisper repetition loop on masked speech that filters.py already
+    # documents for "medium". Part of that is a decode setting rather than the
+    # weights: transcribe() runs temperature=0.0 with no fallback, which is the
+    # configuration Whisper loops under. Chasing it is not worth it, because the
+    # two collab arms sink the model on their own — give turbo qwen3's
+    # loud-game score outright and its average is still 0.535.
+    #
+    # Kept rather than deleted so the negative result stays reproducible, the way
+    # "medium" is kept with its own losing numbers. Do not make it a default.
+    "turbo": "mlx-community/whisper-large-v3-turbo-q4",
 }
 
 
@@ -34,7 +66,16 @@ class MLXWhisperEngine(STTEngine):
         import mlx_whisper
 
         self._mlx = mlx_whisper
-        self.repo = REPO.get(cfg.model, REPO["small"])
+        try:
+            self.repo = REPO[cfg.model]
+        except KeyError:
+            # Was REPO.get(cfg.model, REPO["small"]): a typo'd or unsupported
+            # name quietly loaded `small` and reported nothing, so a bake-off
+            # arm could measure a model nobody selected.
+            raise RuntimeError(
+                f"[stt] model {cfg.model!r} is not a Whisper model this engine "
+                f"knows. Available: {', '.join(sorted(REPO))}."
+            ) from None
         self.cfg = cfg
 
     def transcribe(self, audio: np.ndarray) -> STTResult:

@@ -339,7 +339,7 @@ _CHOICES = {
     # "qwen3"/"qwen3-small" are Qwen3-ASR via MLX and are Apple-Silicon only;
     # stt/factory.py raises rather than falling back, so selecting one on
     # other hardware fails loudly instead of running a different model.
-    ("stt", "model"): {"tiny", "base", "small", "medium", "kotoba",
+    ("stt", "model"): {"tiny", "base", "small", "medium", "kotoba", "turbo",
                        "qwen3", "qwen3-small"},
     ("stt", "lang_mode"): {"pinned", "detect"},
     ("nlp", "tokenizer"): {"janome", "mecab", "unidic"},

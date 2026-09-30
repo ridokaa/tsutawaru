@@ -14,6 +14,8 @@ from tsutawaru.stt.base import STTEngine, STTResult
 # for a different runtime — which is why the two tables cannot be shared.
 REPO = {
     "kotoba": "kotoba-tech/kotoba-whisper-v2.0-faster",
+    # CTranslate2 spells this one out; bare "turbo" is not a size it knows.
+    "turbo": "large-v3-turbo",
 }
 
 
