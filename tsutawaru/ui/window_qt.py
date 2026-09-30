@@ -76,7 +76,7 @@ RAIL_PENDING = "#5a6172"
 CARD_OPEN = (
     '<table width="100%" cellspacing="0" cellpadding="0" border="0"><tr>'
     '<td bgcolor="{rail}" width="4"><font size="1">&nbsp;</font></td>'
-    '<td bgcolor="#171a21" style="padding:10px 12px;">'
+    '<td class="cbody" style="padding:10px 12px;">'
 )
 CARD_CLOSE = '</td></tr></table><div class="gap">&nbsp;</div>'
 # Closing a card that the next one continues. The VAD's max-length flush cuts a
@@ -117,6 +117,10 @@ body { background:#0f1115; color:#e8e8ea;
    through every margin — and the border-left was never drawn at all. The same
    content in a one-row table renders as one solid box. Tables are also what the
    A/B lane below already relies on. */
+/* The card body. A class rather than a bgcolor attribute because the live lane
+   overrides it — and an attribute wins over the sheet, verified: a `.cbody` rule
+   left a card carrying bgcolor unchanged. */
+.cbody  { background-color:#171a21; }
 .gap    { font-size:5px; }          /* the space between cards; Qt ignores table margins */
 .stream { color:#7d8595; font-size:11px; text-transform:uppercase;
           letter-spacing:.08em; margin-bottom:6px; }
@@ -170,6 +174,16 @@ body { background:#0f1115; color:#e8e8ea;
 .ehint   { color:#4a5060; font-size:12px; line-height:1.5;
            border-left:2px solid #2a2f3a; padding-left:10px; }
 .empty b { color:#7d8595; font-weight:600; }
+"""
+
+# Appended to _CSS for the live lane only, so the card being spoken reads as the
+# active one. A later rule of equal specificity wins in Qt's cascade — verified —
+# so this needs no plumbing through the renderers: same HTML, a second sheet.
+# Held to a few points of lightness and a slight blue lift off the history card
+# (#171a21): enough that the eye lands there first, not enough to look like a
+# different kind of object.
+_LIVE_CSS = """
+.cbody  { background-color:#1b2130; }
 """
 
 # Control strip (source switcher). Plain Qt stylesheet, not document CSS.
@@ -540,9 +554,9 @@ try:
             self.live.setOpenExternalLinks(False)
             self.live.setOpenLinks(False)
             self.live.anchorClicked.connect(self._on_anchor)
-            self.live.document().setDefaultStyleSheet(_CSS)
+            self.live.document().setDefaultStyleSheet(_CSS + _LIVE_CSS)
             self.live.setStyleSheet(
-                "QTextBrowser{background:#0f1115;border:none;"
+                "QTextBrowser{background:#12151d;border:none;"
                 "border-top:1px solid #242936;padding:12px;}"
             )
             self.live.document().documentLayout().documentSizeChanged.connect(

@@ -283,3 +283,35 @@ def test_untrusted_line_renders_dimmed_and_tagged(qapp):
             assert block.begin().fragment().charFormat().font().pixelSize() == 19
             break
         block = block.next()
+
+
+def test_live_card_is_a_different_dark_than_the_history_cards(sink):
+    """The live lane is styled by a second sheet, not by a flag on the renderer.
+
+    Both panes are handed the same card HTML, so the only thing that can make
+    the newest line read as the active one is `_LIVE_CSS` winning the cascade in
+    that one document. Asserted on pixels because that cascade is Qt's, not
+    ours: an equally specific earlier rule, or a leftover bgcolor attribute,
+    would leave both panes identical and every string assertion would pass.
+    """
+    from PyQt6 import QtGui
+
+    from tsutawaru.ui.window_qt import _LIVE_CSS
+
+    s, win, app = sink
+    _push(3)
+    s.tick(win)
+    app.processEvents()
+
+    def colours(widget):
+        img = widget.grab().toImage()
+        return {img.pixelColor(x, y).name()
+                for y in range(0, img.height(), 3)
+                for x in range(0, img.width(), 7)}
+
+    history, live = colours(win.view), colours(win.live)
+    assert "#171a21" in history and "#171a21" not in live
+    assert "#1b2130" in live and "#1b2130" not in history
+    # And it is still dark — a lift, not a light card.
+    assert max(QtGui.QColor("#1b2130").getRgb()[:3]) < 60
+    assert ".cbody" in _LIVE_CSS
