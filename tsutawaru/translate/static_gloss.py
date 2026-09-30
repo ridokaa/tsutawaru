@@ -36,8 +36,8 @@ STATIC = {
     "なる": "to become",
     "ちょっと": "a little / somewhat",
     # JMdict's first sense is "terrible / dreadful", which is correct and wrong:
-    # in speech this is almost always admiration. Observed on line 1 of the
-    # 20260822 corpus (すごいねホゲホゲ).
+    # in speech this is almost always admiration, which is how every instance on
+    # the recorded corpora reads.
     "すごい": "amazing / wow",
     "そう": "so / that way",
     "でも": "but / however",
