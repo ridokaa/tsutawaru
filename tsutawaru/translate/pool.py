@@ -29,10 +29,6 @@ class TranslationPool:
         self.backend = backend
         self.cache = cache
         self.cfg = cfg
-        # Dedicated lane: Sentence jobs never queue behind gloss batches
-        self.sentence_ex = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="xlate-sent"
-        )
         self.gloss_ex = ThreadPoolExecutor(
             max_workers=cfg.gloss_workers, thread_name_prefix="xlate-gloss"
         )
@@ -44,10 +40,26 @@ class TranslationPool:
         the reader has turned off, so skipping it is the whole saving. It also
         makes the sentence lane the last one to report, which is why it has to
         take over marking the line complete — see `_sentence`.
+
+        **Blocking on purpose.** The sentence translation runs on the caller's
+        thread, which is the one draining `trans_q`, so that bounded drop-oldest
+        queue is the translator's backlog and nothing else is. This used to be a
+        `ThreadPoolExecutor(max_workers=1)`, whose work queue is unbounded: the
+        slowest stage in the pipeline was the one stage with no backpressure,
+        and `trans_q`'s bound never engaged because this method emptied it
+        instantly. Measured consequence — fed 40 lines at 10/s into a lane
+        draining at 2/s, `trans_q` reported depth 0 and 0 dropped while the
+        executor's own backlog reached 31 and per-line latency grew linearly
+        from 0.5 s to 16.1 s. Live, one line took 59 s (2026-09-30 session).
+        Sustained MLX generation also starves the other Python workers, so an
+        unbounded backlog stalls the Japanese tier too, not just the English.
+
+        The gloss lane stays on its executor: it is JMdict and a dict lookup,
+        measured p50 0.5 ms, so it cannot build a backlog worth bounding.
         """
-        self.sentence_ex.submit(self._sentence, seg, not glosses)  # priority lane
         if glosses:
             self.gloss_ex.submit(self._glosses, seg)  # bulk lane
+        self._sentence(seg, not glosses)
 
     def submit_glosses(self, seg: Segment) -> None:
         """Fill in a line's breakdown after the fact.
@@ -68,7 +80,6 @@ class TranslationPool:
         self.gloss_ex.submit(self._alt_sentence, seg)
 
     def shutdown(self) -> None:
-        self.sentence_ex.shutdown(wait=False)
         self.gloss_ex.shutdown(wait=False)
         self.cache.flush()
 
@@ -201,8 +212,7 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.pool
         # static_gloss before the backend is ever consulted.
         seg.tokens = [Token(surface="ぬるぽぽぽ", base_form="ぬるぽぽぽ", pos="名詞",
                             romaji="nurupopopo")]
-        pool.submit(seg, glosses=glosses)
-        pool.sentence_ex.shutdown(wait=True)
+        pool.submit(seg, glosses=glosses)   # sentence lane is synchronous
         pool.gloss_ex.shutdown(wait=True)
         return seg, _drain()
 

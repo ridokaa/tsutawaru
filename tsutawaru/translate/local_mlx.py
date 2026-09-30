@@ -25,6 +25,7 @@ where the Japanese names no subject and the two variants supply a different one.
 The Japanese states no subject on 108 of those 120 lines, so this is the failure
 that reads as wrong, and none of the columns above can see it.
 
+    (synthetic example of the shape; the graded lines are not reproduced here)
     朝から並んでたのに売り切れだったらしい。
       bare:   "I queued from the morning but it was apparently sold out."
       +en:    "He queued from the morning but it was apparently sold out."
@@ -78,8 +79,10 @@ REPO = {
 # entirely 24 — against qwen3.5's 2. `local_model` still loads it by repo name
 # for anyone who wants it; it is no longer offered as a choice.
 
-# The name rule is measured, not stylistic. Without it ミドリさん comes out as "a
-# green colour" and ハナさん as "a flower" — 4 of 15 name lines
+# The name rule is measured, not stylistic. Handles here are invented stand-ins
+# for the real ones, chosen to keep the property that matters: a Japanese name is
+# usually also a common noun, so an untreated one is *translated*. Without the
+# rule ミドリさん comes out as "Mr. Green" and ハナさん as "a flower" — 4 of 15 name lines
 # survived on the stream corpus and 3 became English dictionary words.
 #
 # Three things about the wording are load-bearing, and each cost a defect to
@@ -87,12 +90,12 @@ REPO = {
 #
 # 1. No example names. A first version read "...keep the honorific (Midori-san,
 #    Hana-san)" and the model copied those two straight out of the prompt —
-#    ハナさん, ソラさん and ユキさん all came back "Midori-san", in bare
-#    mode where there was no context to blame. A name in a prompt is a one-shot
-#    example, and these models take it.
+#    every distinct handle in the sample came back as the *first* example name,
+#    in bare mode where there was no context to blame. A name in a prompt is a
+#    one-shot example, and these models take it.
 # 2. Scoped to the honorific, not to "names". "Write personal names as romanized
-#    Japanese" bled onto whole sentences: そろそろ行きますね -> "Sorosoro ikimasu
-#    ne".
+#    Japanese" bled onto whole sentences: そろそろ行きますね -> "Sorosoro
+#    ikimasu ne".
 # 3. Shaped as a constraint on the output, not an instruction about names. The
 #    scoped wording above was tuned against Qwen3 and bled again on Qwen3.5;
 #    saying what the output may contain fixed it where saying what to do did not.
@@ -103,7 +106,7 @@ REPO = {
 #      output-shaped (shipped)                  0             0            7 /  8
 #
 # The residual is not fixable here: the translator can only romanize what the
-# ASR heard, and a handle like ソルトさん really does mean "salt". That one belongs to
+# ASR heard, and a handle like ソルトさん really does mean "salt". That belongs to
 # `stt.initial_prompt` — see config.example.toml.
 NAME_RULE = (
     "Your output must be English, with no romanized Japanese in it, except for a "
@@ -126,8 +129,8 @@ NAME_RULE = (
 # The oracle arm is the ceiling and is not reachable: it used caption knowledge
 # tsutawaru does not have at runtime. What the numbers understate is the cost —
 # restoring the mark changed the *words*, not just the punctuation, on 101 of
-# those 124 lines: これちょっと高くない went from "This is a little
-# expensive." to "Isn't this a bit expensive?". Flattening does not drop a
+# those 124 lines — of the shape これちょっと高くない, which goes from "This is
+# a little expensive." to "Isn't this a bit expensive?". Flattening does not drop a
 # question mark, it answers the question wrongly.
 #
 # Measured on the bare prompt. The context prompt carries it for consistency and
@@ -160,10 +163,30 @@ CONTEXT_PROMPT = (
     "\n\n {src}"
 )
 
-# Generous relative to the utterances this sees (VAD caps an utterance at 12 s),
-# but it is a runaway guard, not a budget: a repetition loop on garbled ASR input
-# is the only thing that ever reaches it.
-MAX_TOKENS = 256
+# A runaway guard, not a budget: a repetition loop on garbled ASR input is the
+# only thing that ever reaches it. What matters is therefore the *wall time* a
+# runaway can burn, because the sentence lane is single-threaded and everything
+# behind it waits (see TranslationPool.submit).
+#
+# Measured on the 160-line ASR arm of the MT bake-off sample, running this file's
+# current prompt:
+#
+#   output tokens   p50 14   p90 45   p99 64   max 71
+#   cap    lines it would cut      worst-case decode
+#    64            2  (1.2%)             3.0 s
+#    80            0  (0.0%)             3.7 s
+#    96            0  (0.0%)             4.5 s
+#   256            0  (0.0%)            11.9 s
+#
+# 96 is the first round number clear of the longest real translation observed
+# (71 tokens) with ~35% headroom, and it cuts the runaway ceiling from 11.9 s to
+# 4.5 s at the 21 tok/s this machine sustained during that run. Nothing in the
+# sample is truncated by it. Lowered from 256 on 2026-09-30, after a live session
+# showed a 59 s line.
+#
+# Note the echo path calls `_generate` twice, so one starved line can still pay
+# this twice over.
+MAX_TOKENS = 96
 
 
 # A generated translation that fell into a repetition loop. The character n-gram
@@ -233,7 +256,26 @@ def _undupe(text: str) -> str:
 # character count only says the line was long. The observed failure echoed a
 # 7-word line and a 12-word line and still fires; "Come on.", "Yes, that's
 # right." and "Okay," no longer can.
-ECHO_MIN_LINES = 2
+#
+# One line is enough. It was two while the response to an echo was to cut the
+# echoed text out and keep the remainder, because on one match that surgery
+# often removed the whole line: replayed over the eight recorded sessions, a
+# threshold of 1 fires on 15 lines against 2, and 6 of the 13 it adds are left
+# with nothing at all. Now that the response is to translate the line again with
+# the context withheld there is no remainder to lose, so the cost of being wrong
+# is one extra generation rather than a blanked line — and 13 more inventions are
+# caught. That generation is not free: measured on the 160-line fixed sample it
+# is p50 0.73 s and p99 2.7 s, and MAX_TOKENS bounds it at ~4.6 s, so a false
+# positive roughly doubles one line's worst case. It stays worth it only because
+# the firing rate is low (15 lines across eight replayed sessions), and because
+# the false-positive rate is nil: replayed as a rolling 3-line history over the
+# 320 bake-off lines, which were translated in isolation and so cannot contain a
+# real echo, a threshold of 1 fires on 0 of them. On the 119-line context-on
+# sample it fires on 6 that a threshold of 2 misses. Measured on those same sessions: every one of the 9
+# lines replayed through the model produced a clean translation without context
+# a two-character filler whose echo was a whole previous question came back as
+# a two-word translation of the filler itself).
+ECHO_MIN_LINES = 1
 ECHO_MIN_WORDS = 4
 
 
@@ -368,6 +410,20 @@ class LocalTranslator(Translator):
         except (TypeError, ValueError, KeyError):
             return self.tok.apply_chat_template(msg, add_generation_prompt=True)
 
+    def _generate(self, src: str, history) -> str:
+        """One pass through the model. The caller holds `self.lock`.
+
+        `history` is a parameter rather than read off self, because the echo
+        guard's retry is exactly the same call with it emptied.
+        """
+        from mlx_lm import generate
+
+        msg = [{"role": "user", "content": _prompt(src, history)}]
+        return generate(
+            self.model, self.tok, self._chat(msg),
+            max_tokens=MAX_TOKENS, sampler=self.sampler, verbose=False,
+        ).strip()
+
     def sentence(self, text: str, remember: bool = True) -> str:
         """`remember=False` translates with the context but does not join it.
 
@@ -379,35 +435,46 @@ class LocalTranslator(Translator):
         text = text.strip()
         if not text:
             return ""
-        from mlx_lm import generate
-
         # The ASR's trailing "。" is a formatting habit, not a signal from the
         # speaker, and the translator treats it as one — see INTENT_RULE. Only
         # the text handed to the model is trimmed; `seg.original` still shows
         # what was transcribed.
         src = text[:-1] if text.endswith("。") else text
-        msg = [{"role": "user", "content": _prompt(src, self.history)}]
         with self.lock:
-            prompt = self._chat(msg)
-            out = generate(
-                self.model, self.tok, prompt,
-                max_tokens=MAX_TOKENS, sampler=self.sampler, verbose=False,
-            )
-            out = out.strip()
+            out = self._generate(src, self.history)
             if _echoes_context(out, self.history):
                 from tsutawaru.stt.filters import DROPS
 
                 DROPS["mt-echo"] += 1
-                # `_undupe` unconditionally, not behind `_looped`: inside this
-                # branch the output is already known bad, and what survives the
-                # strip is often one sentence said twice — too short to reach
-                # the loop thresholds, which exist to protect healthy output.
-                out = _undupe(_strip_echo(out, self.history))
-                log.warning("[translate] context echoed back for %r — kept %r",
+                # Translate it again with the context withheld, rather than
+                # cutting the echoed text out of a bad answer and hoping what
+                # is left is a good one. An echo means the model had nothing in
+                # the line to work with and continued the conversation instead;
+                # take the conversation away and it answers from the line.
+                #
+                # Measured on the nine recorded echoes: every retry came back
+                # clean, and on the two that had run away it was also 15x
+                # faster (5702 ms -> 377 ms), because a starved generation runs
+                # to MAX_TOKENS while an answerable one stops at a sentence.
+                #
+                # `_undupe` unconditionally, not behind `_looped`: a retry can
+                # still ramble on a line that is genuinely untranslatable, and
+                # what comes back is often one sentence said twice — too short
+                # to reach the loop thresholds, which exist to protect healthy
+                # output.
+                retry = _undupe(self._generate(src, ()))
+                # If the retry came back with nothing, cutting the echo out of
+                # the first answer is still better than an empty line — and it
+                # reuses the answer already in hand rather than paying for a
+                # third pass at the same bad prompt.
+                out = retry or _undupe(_strip_echo(out, self.history))
+                log.warning("[translate] context echoed back for %r — "
+                            "retranslated without it as %r",
                             text[:40], out[:60] or "(nothing)")
-                # Never remembered, salvaged or not: an output that recited the
-                # context once will do it again from the same context, and
-                # that is how one bad line becomes four.
+                # Never remembered, retried or salvaged. A line that provoked an
+                # echo is one the model could not answer from its own content,
+                # which makes its translation the least reliable thing to
+                # condition the next three lines on.
                 return out
             if _looped(out):
                 # Counted under the same counter --stats prints for the ASR
@@ -503,8 +570,11 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.local_ml
     assert not _looped(echo), "this is the case the loop guard cannot see"
     assert _echoes_context(echo, hist), "context echo went undetected"
     assert not _echoes_context("The cat sat on the roof.", hist)
-    # A speaker repeating one line must not look like an echo.
-    assert not _echoes_context(hist[1], hist), "one line is a coincidence"
+    # One substantial line reappearing verbatim is now enough — the response is
+    # to translate again without the context, so being wrong costs a generation
+    # rather than the line. Replayed over the recorded sessions this is what
+    # catches the single-line echoes ("じゃあ。" -> a whole previous question).
+    assert _echoes_context(hist[2] + " And so on.", hist), "one line is enough"
     assert not _echoes_context(echo, []), "no context, nothing to echo"
     # The four shapes that made the first version blank good lines. Every one
     # of these came out of a real stream, and each returned True.
@@ -531,5 +601,32 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.local_ml
 
     # Nothing added at all is still possible, and must come back empty.
     assert _strip_echo("\n".join(hist), hist) == ""
+
+    # The retry, without loading 2.1 GB of weights. A stub model that recites
+    # the context while it has one and answers from the line once it does not —
+    # which is the behaviour the recorded echoes actually showed.
+    class _Stub:
+        name = "stub"
+
+        def __init__(self, answer="It ended there."):
+            self.history = list(hist)
+            self.lock = threading.Lock()
+            self.answer = answer
+
+        def _generate(self, src, history):
+            if history:
+                return hist[2] + " Something I should not have said."
+            return self.answer
+
+    out = LocalTranslator.sentence(_Stub(), "終わった。")
+    assert out == "It ended there.", out
+    # The echoed line is never remembered, retried or not.
+    stub = _Stub()
+    LocalTranslator.sentence(stub, "終わった。")
+    assert list(stub.history) == hist, stub.history
+    # A retry that comes back with nothing falls back to cutting the echo out of
+    # the first answer, rather than blanking the line.
+    assert LocalTranslator.sentence(_Stub(answer=""), "終わった。") \
+        == "Something I should not have said."
 
     print("local_mlx self-check OK")

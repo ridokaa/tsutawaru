@@ -716,18 +716,22 @@ class Orchestrator:
         ui_q.put(("new", seg))
         seg_q.put_latest(seg)
 
-    def _strand(self, seg) -> None:
-        """A provisional whose closing utterance never came. Say so on the card.
+    def _strand(self, seg, reason: str = "stranded") -> None:
+        """Settle a line that nothing more is coming for. Say so on the card.
 
-        This is the one place the loss is knowable: `_emit_segment` pops the
-        entry when the final arrives, so anything still here when a later line
-        pushes it out was evicted from `utt_q` and is never coming. Leaving it
-        alone is what put a permanent "…" under the Japanese, and kept the line
-        out of --log-file entirely — the window waits for `english`, which the
-        sentence lane was never going to send for a provisional.
+        Two callers, one body, because the visible outcome is identical: the
+        text stays, the rail settles, and the English reads "(no translation)"
+        instead of a "…" that will never resolve.
+
+        `stranded` — a provisional whose closing utterance never came.
+        `mt-backlog` — evicted from `trans_q` before the translator got to it.
+
+        Both are knowable exactly where they happen and nowhere else: leaving
+        either alone is what put a permanent "…" under the Japanese and kept the
+        line out of --log-file entirely, since the window waits for `english`.
         """
-        if seg is None or not seg.provisional:
-            return
+        if seg is None or seg.dropped:
+            return          # idempotent: a second sweep must not double-count
         seg.provisional = False
         seg.partial = False   # the rail reads settled: nothing more is coming
         seg.dropped = True
@@ -735,8 +739,8 @@ class Orchestrator:
         # filter reasons rather than needing its own reporting path.
         from tsutawaru.stt.filters import DROPS
 
-        DROPS["stranded"] += 1
-        log.debug("stranded provisional seg %d: %r", seg.id, seg.original)
+        DROPS[reason] += 1
+        log.debug("%s seg %d: %r", reason, seg.id, seg.original)
         ui_q.put(("dropped", seg))
 
     def _emit_segment(self, utt: Utterance, res):
@@ -838,7 +842,10 @@ class Orchestrator:
                 # Romaji and tokens only. The sentence lane sees this line once,
                 # when it is whole — see `_show_provisional`.
                 continue
-            trans_q.put_latest(seg)
+            # `trans_q` is the translator's whole backlog now (see
+            # TranslationPool.submit), so an eviction here is a line that will
+            # never be translated. Saying so beats a "…" that never resolves.
+            self._strand(trans_q.put_latest(seg), "mt-backlog")
 
     def _translate_worker(self):
         pool = self.stages.pool
