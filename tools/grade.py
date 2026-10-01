@@ -26,6 +26,7 @@ Usage:
     python tools/grade.py                        # default sheet, resume where you left off
     python tools/grade.py --file path/to/sheet.md
     python tools/grade.py --tally                # print the score, grade nothing
+    python tools/grade.py --rows 15,28,3-9       # re-check named rows, answered or not
 """
 from __future__ import annotations
 
@@ -45,6 +46,25 @@ DEFAULT_SHEET = (
 )
 
 VERDICTS = {"j": "J", "e": "E", "ok": "OK", "o": "OK"}
+
+
+def _spec(s: str) -> set[str]:
+    """Row numbers from "15,28,3-9". Empty means "every unanswered row".
+
+    Re-grading named rows is the normal case once a sheet is full: a verdict
+    reached by comparing models is provisional, and the rows worth an ear are
+    the handful the notes flag as weak. Without this the only way back into a
+    graded sheet is to blank cells in markdown by hand, which is the friction
+    this tool exists to remove.
+    """
+    out: set[str] = set()
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        lo, _, hi = part.partition("-")
+        out.update(str(n) for n in range(int(lo), int(hi or lo) + 1))
+    return out
 
 HELP = """
   j   Japanese wrong (ASR)      r   replay
@@ -157,7 +177,13 @@ def main() -> int:
                     help="directory of utterance WAVs (default: sibling wav/)")
     ap.add_argument("--tally", action="store_true",
                     help="print the current score and exit")
+    ap.add_argument("--rows", default="",
+                    help="re-grade these rows even if answered, e.g. 15,28,3-9")
+    ap.add_argument("--self-check", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
+
+    if args.self_check:
+        return _selfcheck()
 
     if not args.file.exists():
         print(f"no such sheet: {args.file}", file=sys.stderr)
@@ -178,9 +204,12 @@ def main() -> int:
     if player is None:
         print("  no audio player found (afplay/aplay) — grading from text only\n")
 
-    todo = [i for i, r in enumerate(rows) if not r.verdict]
+    want = _spec(args.rows)
+    todo = [i for i, r in enumerate(rows)
+            if (r.num in want if want else not r.verdict)]
     if not todo:
-        print("every row already has a verdict. Blank a cell to redo it.")
+        print("nothing to grade. Name rows to re-check with --rows 15,28"
+              if not want else f"no such row(s): {args.rows}")
         report(rows)
         return 0
 
@@ -230,6 +259,30 @@ def main() -> int:
 
     save(args.file, lines, rows)
     report(rows)
+    return 0
+
+
+def _selfcheck() -> int:
+    assert _spec("") == set()
+    assert _spec("15,28") == {"15", "28"}
+    assert _spec(" 3 - 5 , 9 ") == {"3", "4", "5", "9"}
+    assert _spec("7-7") == {"7"}
+    # A full sheet: --rows reaches answered rows, the default reaches none.
+    lines = [
+        "| # | wav | JP | EN | conf | verdict |",
+        "|--:|:--|:--|:--|--:|:--|",
+        "| 1 | `utt_1` | あ | ah | — | OK |",
+        "| 2 | `utt_2` | い | ee | — | J |",
+        "| 3 | `utt_3` | う | oo | — |  |",
+    ]
+    rows = parse(lines)
+    assert [r.num for r in rows] == ["1", "2", "3"], rows
+    pick = lambda spec: [rows[i].num for i, r in enumerate(rows)
+                         if (r.num in _spec(spec) if _spec(spec) else not r.verdict)]
+    assert pick("") == ["3"], pick("")
+    assert pick("1,2") == ["1", "2"], pick("1,2")
+    assert tally(rows) == {"J": 1, "E": 0, "OK": 1, "": 1}, tally(rows)
+    print("grade self-check OK")
     return 0
 
 
