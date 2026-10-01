@@ -10,17 +10,44 @@ Built to follow Japanese friends in Discord voice calls in real time, and to lea
 
 ## Key Features
 
-- **Decoupled Low-Latency Pipeline:** Real-time VAD boundary detection, local Whisper STT inference, token-level morphological analysis, and multi-threaded sentence/gloss translation.
+- **Decoupled Low-Latency Pipeline:** Real-time VAD boundary detection, local speech recognition (Qwen3-ASR by default, Whisper models selectable), token-level morphological analysis, and multi-threaded sentence/gloss translation.
+- **Offline by Default:** Speech recognition, sentence translation (Qwen3.5-4B on MLX) and the word breakdown (JMdict) all run on the Mac. A call can run with the network unplugged.
 - **Learner-First Morphological Breakdown:** Intelligently agglutinates bound morphemes (e.g. `おはようございます`, `ですね`), pairs each word with dictionary form and romanization, and resolves particles at zero latency.
 - **Per-Application Capture:** On macOS, taps one application directly through Core Audio — so a game running next to a voice call is never captured in the first place. No virtual audio driver, no output routing.
 - **Silent & Non-Interfering:** Read-only capture. No TTS, no audio playback, ever.
-- **Multiple Output Sinks:** Rich terminal live view, floating transparent desktop overlay (PyQt6), and WebSocket server for OBS Browser Docks and browser overlays.
+- **Readable Live Window:** Each line is a card; the newest one is highlighted as the active line. Japanese appears as a provisional line while someone is still talking and is replaced in place when they finish. Text is copyable, English is set in a Latin face, and the text column stops at a readable width however wide the window gets.
+- **Multiple Output Sinks:** The window above, a rich terminal live view, a floating transparent desktop overlay (PyQt6), and a WebSocket server for OBS Browser Docks and browser overlays.
+
+## Status
+
+*As of 2026-10-01. Developed and measured on macOS / Apple Silicon (M5 Air, 16 GB).*
+
+| Mode | State |
+|---|---|
+| YouTube / streams | In regular use: eight live sessions on the current pipeline since 2026-09-29. |
+| Discord calls | Capture proven on a real call (2026-08-22), on an older pipeline. Not yet run live on the current one. |
+| Windows / Linux | Code paths exist; untested. The default models need Apple Silicon. |
+
+**Measured on one recorded Discord call** (600 utterances, 23 minutes), run through the current pipeline:
+
+- **Speech recognition:** p50 205 ms per utterance. On the 11 hardest lines, graded by ear, the Japanese was right on 10. The 11th was unintelligible to a human listener too.
+- **Translation:** 588 of 588 lines translated offline, p50 425 ms / p95 849 ms, about 0.4% objectively broken (Japanese left in, loops, empty output).
+
+**Known weaknesses**, in the order they are being worked on:
+
+1. **Short fragments.** Japanese often leaves out who is speaking. On a fragment, the translator completes a full English sentence and fills in a subject, usually "I", that the speaker never said. On those same 11 hard lines the English was wrong on 8 (a sample picked because it looked suspicious, so not an error rate).
+2. **No doubt signal.** Qwen3-ASR reports no confidence score, so the "unsure" dimming and two hallucination filters do nothing under it. Unclear audio comes out as fluent English that looks exactly like a correct line.
+3. **No end-to-end latency figure.** The numbers above are per stage; time spent waiting in queues is not measured yet.
+4. **Very loud game audio.** On the loudest stream tested, the voice detector misses about 19% of speech starts.
 
 ## Quick Start
 
 ### 1. Requirements & Setup
 
 - Python 3.14 (or 3.11 fallback)
+- Apple Silicon for the defaults. Qwen3-ASR and the MLX translator download on first run.
+  On other platforms pass a Whisper model and a network translator, e.g.
+  `--asr kotoba --translator google`.
 
 ```bash
 # macOS (Apple Silicon)
@@ -61,7 +88,13 @@ python run.py --audio-test --device "BlackHole" --seconds 5
 
 ```bash
 # macOS: tap Discord (per-process capture is the default)
-python run.py --source discord --asr kotoba
+python run.py --source discord
+
+# ... or a stream playing in Chrome
+python run.py --source youtube
+
+# Pick the models yourself (defaults: --asr qwen3 --translator qwen3.5)
+python run.py --source discord --asr kotoba --translator google
 
 # Force the device path, or run on Windows/Linux
 python run.py --audio-backend device --device "BlackHole"
@@ -99,16 +132,23 @@ transcript rather than on their own.
 
 ## Translation
 
-| Tier | Default | Fully offline |
+| Tier | Default | Alternatives |
 |---|---|---|
-| Sentence | Google (`--translator google`) | `--translator qwen3.5` — Qwen3.5-4B on MLX |
-| Breakdown | JMdict, then the sentence provider for what it lacks | JMdict alone |
+| Sentence | Qwen3.5-4B on MLX, offline (`--translator qwen3.5`) | `google`, `deepl` (network), `none` |
+| Breakdown | JMdict, then the sentence provider for what it lacks | — |
 
-`--translator qwen3.5` needs `mlx-lm` and Apple Silicon; it downloads
-`mlx-community/Qwen3.5-4B-MLX-4bit` on first run. Measured on 160 lines of
-stream audio, M5 Air 16 GB: sentence p50 552 ms / p95 1246 ms, 2 objective
-defects. JMdict answers 96.7% of breakdown tokens, so with `mlx` a call runs
-with the network unplugged.
+The offline translator needs `mlx-lm` and Apple Silicon; it downloads
+`mlx-community/Qwen3.5-4B-MLX-4bit` on first run. It became the default on
+2026-09-29 because Google's free endpoint started refusing this machine with a
+429 CAPTCHA, and a network default shipped an app that could not translate.
+
+Measured on the M5 Air: 588 lines of a Discord call at p50 425 ms / p95 849 ms
+with no failures. JMdict answers 96.7% of breakdown tokens, so nothing in a call
+needs the network.
+
+On a stream, the translator is given the previous three lines of English as
+context, because a stream is one speaker. On a call it is not: tsutawaru cannot
+tell speakers apart, and the same context then assigns lines to the wrong person.
 
 ## Audio Capture
 
@@ -167,9 +207,11 @@ tsutawaru/              the package
   ui/                   Qt window and overlay, console sink, WebSocket server
 tests/                  pytest suite (no network, no models)
 tools/                  standalone analysis scripts, not imported by the app
+  grade.py              play clips and grade a sheet by ear (--rows to re-check)
+  defects.py            reference-free defect counter for JP->EN lines
 experiments/
   sessions/             recorded sessions; `--record` writes here by default
-  reports/              comparison sheets produced by tools/compare4.py
+  reports/              measurement and comparison reports
 ```
 
 `experiments/` is gitignored and stays on your machine: the recordings
