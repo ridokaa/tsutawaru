@@ -49,16 +49,18 @@ STICKY_BOTTOM_PX = 40  # treat "within 40px of the end" as pinned to the bottom
 MAX_TEXT_PX = 660
 # The live lane: the newest segment, held still below the scrollback instead of
 # sliding up its bottom edge. Both bounds are widget heights, measured by laying
-# real cards out at the text cap and adding the lane's own 25px of chrome — one
-# JP line 157, two 200, +29 for a collapsed breakdown header, ~490 with it open.
+# real cards out at the text cap and adding the lane's own chrome. Re-measured
+# after _LIVE_CSS enlarged the tiers: one JP line 168, two 217, +29 for a
+# collapsed breakdown header on either, 278 with it open.
 #
 # The minimum is a one-line card, so every ordinary utterance renders at exactly
 # the floor and the lane holds still across the whole provisional -> final ->
 # next-line cycle; only a genuine second line of Japanese moves it. The maximum
-# clears two JP lines plus the breakdown header, and leaves an opened breakdown
-# to scroll inside the lane rather than eat half the window.
-LIVE_MIN_PX = 160
-LIVE_MAX_PX = 240
+# clears the tallest card that is still just a card — two JP lines plus the
+# breakdown header, 246 — and leaves an opened breakdown to scroll inside the
+# lane rather than eat half the window.
+LIVE_MIN_PX = 172
+LIVE_MAX_PX = 250
 # href prefix for the per-word breakdown toggle. Not a real scheme: it never
 # leaves the widget, because setOpenLinks(False) routes every click to us.
 TOK_SCHEME = "tok:"
@@ -71,11 +73,26 @@ ANCHOR_PREFIX = "seg"
 # explicit width and a space inside it — an empty cell collapses to nothing, and a
 # CSS width let it expand and swallow the row. Colour is the only thing that
 # changes between a settled line and one still being spoken.
+#
+# Three colours across two axes, which are not the same axis:
+#
+#   grey  — still being spoken. Means the same in either pane, so it is not
+#           overridden: a line that has not landed yet is not "the live one", it
+#           is "not finished", and the lane is the only place it can appear.
+#   cyan  — settled, and in the live lane.
+#   blue  — settled, in the scrollback.
+#
+# The hue carries the pane and the state carries the value: cyan and blue sit at
+# the same lightness, so neither reads as louder than the other, while grey is
+# plainly the quiet one. Set by class rather than by the bgcolor attribute,
+# because an attribute wins over the sheet — measured — and the live override
+# would never land.
 RAIL_FINAL = "#3d7dff"
 RAIL_PENDING = "#5a6172"
+RAIL_LIVE = "#2fc4d6"
 CARD_OPEN = (
     '<table width="100%" cellspacing="0" cellpadding="0" border="0"><tr>'
-    '<td bgcolor="{rail}" width="4"><font size="1">&nbsp;</font></td>'
+    '<td class="{rail}" width="4"><font size="1">&nbsp;</font></td>'
     '<td class="cbody" style="padding:10px 12px;">'
 )
 CARD_CLOSE = '</td></tr></table><div class="gap">&nbsp;</div>'
@@ -174,17 +191,34 @@ body { background:#0f1115; color:#e8e8ea;
 .ehint   { color:#4a5060; font-size:12px; line-height:1.5;
            border-left:2px solid #2a2f3a; padding-left:10px; }
 .empty b { color:#7d8595; font-weight:600; }
-"""
+""" + (
+    # Interpolated rather than written inline so the rail colours stay single
+    # constants: the tests sample the rail in pixels and compare against these.
+    f".rail     {{ background-color:{RAIL_FINAL}; }}\n"
+    f".railwait {{ background-color:{RAIL_PENDING}; }}\n"
+)
 
 # Appended to _CSS for the live lane only, so the card being spoken reads as the
 # active one. A later rule of equal specificity wins in Qt's cascade — verified —
 # so this needs no plumbing through the renderers: same HTML, a second sheet.
-# Held to a few points of lightness and a slight blue lift off the history card
-# (#171a21): enough that the eye lands there first, not enough to look like a
-# different kind of object.
+#
+# Four axes, all small: lighter ground, larger type, brighter ink, and a rail in
+# a different hue. Each is weak on its own and they are read together, which is
+# what keeps the card recognisably the same object as the ones above it instead
+# of a second kind of thing.
+#
+# .railwait is deliberately absent — see the rail comment above.
+#
+# Only font-size is restated on the tiers, never font-family: the base rules stay
+# in force for everything they set, and naming a family here would re-run the bug
+# the .jp comment above records — verified, the live Japanese still reports
+# Hiragino Sans at the larger size.
 _LIVE_CSS = """
-.cbody  { background-color:#1b2130; }
-"""
+.cbody  { background-color:#1f2639; }
+.jp     { font-size:22px; }
+.romaji { font-size:14px; color:#aab4c8; }
+.en     { font-size:17px; color:#a6f0b6; }
+""" + f".rail {{ background-color:{RAIL_LIVE}; }}\n"
 
 # Control strip (source switcher). Plain Qt stylesheet, not document CSS.
 _BAR_QSS = """
@@ -334,8 +368,7 @@ def _fmt_block(seg: Segment, cfg: UiCfg, expanded: bool = False,
     """
     esc = html.escape
     close = CARD_CLOSE_JOINED if joined_below else CARD_CLOSE
-    rail = RAIL_PENDING if seg.partial else RAIL_FINAL
-    out = [CARD_OPEN.format(rail=rail)]
+    out = [CARD_OPEN.format(rail="railwait" if seg.partial else "rail")]
     # Scroll anchor. Carries no href, so QTextBrowser does not treat it as a
     # hyperlink and the block's own CSS keeps winning — verified: the character
     # it attaches to stays #e8e8ea with no underline. Inside the cell, which the
