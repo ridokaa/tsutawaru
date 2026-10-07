@@ -321,6 +321,51 @@ def _strip_echo(text: str, history) -> str:
     return " ".join(body.split())
 
 
+# A key that ends where the next character is a small kana has matched half a
+# syllable: a name ending in チ, found inside a word spelled with チョ, ends on
+# the チ of that チョ.
+_SMALL_KANA = "ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ"
+
+
+def _name_hits(text: str, names) -> list[tuple[str, str]]:
+    """The `translate.names` entries this line really contains.
+
+    Substring matching cannot tell a name from the same kana inside a word, so
+    a key that collides with common speech belongs in config with its honorific
+    attached (かなちゃん, not かな, which ends every 〜かな musing).
+    """
+    return [(jp, en) for jp, en in (names or {}).items()
+            if re.search(re.escape(jp) + f"(?![{_SMALL_KANA}])", text)]
+
+
+_EN_HONORIFIC = re.compile(r"\b([A-Z][A-Za-z']*)-(?:san|chan|kun|sama)\b")
+
+
+def _enforce_names(out: str, hits) -> str:
+    """Put a configured spelling back where the model wrote its own.
+
+    The prompt asks, and mostly that is enough (names right 7/52 -> 49/52). It
+    is not enough for a name with a famous reading: configure ジョン as "Jon" and
+    the model still writes "John-san", because ジョン is how Japanese writes
+    John. So when exactly one configured name is missing from the
+    output and exactly one other honorific-marked name is in it, that one is
+    the miss.
+    ponytail: honorific-marked only — "Mr. Green" for a misheard ミドリさん, or
+    a bare "John", is left alone. Widen only with a measured false-swap rate.
+    """
+    want = {en.split("-")[0] for _, en in hits}
+    missing = [w for w in want if w.lower() not in out.lower()]
+    if len(missing) != 1:
+        return out
+    known = {w.lower() for w in want}
+    cands = {m.group(1) for m in _EN_HONORIFIC.finditer(out)
+             if m.group(1).lower() not in known}
+    if len(cands) != 1:
+        return out
+    wrong = cands.pop()
+    return re.sub(rf"\b{re.escape(wrong)}(?=-(?:san|chan|kun|sama)\b)", missing[0], out)
+
+
 def _prompt(text: str, history, names=None) -> str:
     """Empty history gives the bare prompt unchanged, not an empty context block.
 
@@ -338,7 +383,7 @@ def _prompt(text: str, history, names=None) -> str:
         ctx="\n".join(history), src=text)
     # Only the names this line contains: an entry in a prompt is a one-shot
     # example, and one the line does not contain gets copied in (NAME_RULE, 1).
-    hits = [(jp, en) for jp, en in (names or {}).items() if jp in text]
+    hits = _name_hits(text, names)
     if not hits:
         return p
     cut = len(text) + 3  # "\n\n " + text always ends both templates
@@ -433,10 +478,11 @@ class LocalTranslator(Translator):
         from mlx_lm import generate
 
         msg = [{"role": "user", "content": _prompt(src, history, self.names)}]
-        return generate(
+        out = generate(
             self.model, self.tok, self._chat(msg),
             max_tokens=MAX_TOKENS, sampler=self.sampler, verbose=False,
         ).strip()
+        return _enforce_names(out, _name_hits(src, self.names))
 
     def sentence(self, text: str, remember: bool = True) -> str:
         """`remember=False` translates with the context but does not join it.
@@ -538,6 +584,24 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.local_ml
         pn = _prompt("ミドリさん来た", h, nm)
         assert "ミドリ = Midori" in pn and "Hana" not in pn, pn
         assert pn.endswith("\n\n ミドリさん来た"), pn
+
+    # Half a syllable is not a name; an honorific-anchored key cannot fire
+    # inside 〜ませんか.
+    nm2 = {"ミドリ": "Midori", "ハナちゃん": "Hana"}
+    assert _name_hits("ミドリョコ", nm2) == [] and _name_hits("ミドリさん", nm2)
+    assert _name_hits("そうかな", {"かなちゃん": "Kana"}) == []
+    # The post-fix: one missing name, one stray honorific name -> swapped.
+    hit = [("ジョン", "Jon")]
+    assert _enforce_names("Ask John-san, then John-san.", hit) == \
+        "Ask Jon-san, then Jon-san."
+    assert _enforce_names("Jon-san said so.", hit) == "Jon-san said so."
+    # Two candidates or none: unknowable which, so untouched.
+    assert _enforce_names("John-san and Shima-chan.", hit) == "John-san and Shima-chan."
+    assert _enforce_names("Mr. Green came.", hit) == "Mr. Green came."
+    assert _enforce_names("John-san came.", []) == "John-san came."
+    # A second configured name that did come out right is not a candidate.
+    two = [("ジョン", "Jon"), ("ハナ", "Hana-chan")]
+    assert _enforce_names("John-san and Hana-chan.", two) == "Jon-san and Hana-chan."
 
     p = _prompt("ねこ", ["The dog barked.", "So did the bird.", "Then a fish."])
     assert p.count("ねこ") == 1, "target line must not also sit in the context"

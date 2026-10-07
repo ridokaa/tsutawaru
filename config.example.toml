@@ -159,11 +159,15 @@ lru_size           = 20000
 persist_cache      = true
 # provider="mlx" only: how to write each name in the English. Japanese on the
 # left, matched exactly, so list every spelling the ASR actually produces. Only
-# the names a line contains go into that line's prompt. Put real names in
-# config.toml, which git ignores, never here:
+# the names a line contains go into that line's prompt, and if the model still
+# writes its own reading ("John-san" for a configured ジョン = "Jon") it is swapped
+# back. A name that also occurs inside ordinary words needs its honorific in the
+# key: "かなちゃん", not "かな", which ends every 〜かな musing. Put real
+# names in config.toml, which git ignores, never here:
 # [translate.names]
 # "ミドリ" = "Midori"
 # "みどり" = "Midori"
+# "ハナちゃん" = "Hana"
 
 [ui]
 sink           = "window"   # "window" (tsutawaru GUI) | "console" | "overlay"
