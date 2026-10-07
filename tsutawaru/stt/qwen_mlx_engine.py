@@ -40,6 +40,7 @@ loud at startup rather than letting it be discovered later.
 from __future__ import annotations
 
 import logging
+import re
 
 import numpy as np
 
@@ -68,6 +69,40 @@ REPO = {
 # threshold would silently discard real speech.
 NO_LOGPROB = 0.0
 NO_SPEECH_PROB = -1.0
+
+
+
+# Qwen3-ASR transcribes its biasing context when the audio gives it too little
+# to go on. Measured with a 16-name prompt over 749 recorded clips: 72 (9.6%) came
+# back as the whole name list instead of 「はい。」 or a laugh — 40/600 on the call,
+# 32/149 on a stream none of those people are in. Leaked clips ran 0.86 s median,
+# up to 2.98 s, overlapping the 1.38 s shortest clip the prompt fixed a name in,
+# so clip length cannot gate it. Rewording only trades leaks for fixes:
+#
+#   framing                            full-list leaks   name fixes kept
+#   "Proper nouns: a、b、…"                  72/89            17/17
+#   "名前：a、b、…"                          47/89            14/17
+#   Japanese sentence                       52/89            13/17
+#   "Context: … People in the call: …"      21/89            11/17
+#
+# Real speech names one or two people per clip, a leak recites the list, so
+# three distinct entries in one transcript means the context came back out and
+# the clip is transcribed again without it. That kept all 17 fixes and removed
+# every leak. A leak of a single name — ねえ聞いて -> ハナ聞いて (shape, not a
+# recorded line) — is under the threshold and gets through.
+PROMPT_ECHO_MIN = 3
+
+
+def _echoes_prompt(text: str, prompt: str) -> bool:
+    """Whether `text` recites the prompt's entries rather than the audio.
+
+    Everything after the first colon is the list — the framing in front of it
+    ("Proper nouns:") is load-bearing for recognition, see config.example.toml.
+    Single characters are not entries: one kanji turns up in ordinary speech.
+    """
+    body = re.split(r"[:：]", prompt, maxsplit=1)[-1]
+    entries = {e for e in re.split(r"[、,，\s]+", body) if len(e) >= 2}
+    return sum(e in text for e in entries) >= PROMPT_ECHO_MIN
 
 
 class QwenMLXEngine(STTEngine):
@@ -125,24 +160,30 @@ class QwenMLXEngine(STTEngine):
         return self.session
 
     def transcribe(self, audio: np.ndarray) -> STTResult:
-        r = self._ensure_session().transcribe(
-            audio,
-            language=self.cfg.language if self.cfg.lang_mode == "pinned" else None,
-            # Qwen3-ASR takes a free-text biasing context, which is a strictly
-            # better home for stt.initial_prompt than Whisper's was: Whisper
-            # prepends it to the decoder history and can echo it back into the
-            # transcript, whereas this conditions recognition without being
-            # transcribable. It is the intended fix for the proper nouns this
-            # session keeps mangling (カベテリア for カフェテリア, ディスコート
-            # for Discord) — but it is a knob, not a result, until graded.
-            context=self.cfg.initial_prompt or "",
-        )
+        prompt = self.cfg.initial_prompt or ""
+        r = self._run(audio, prompt)
+        if prompt and _echoes_prompt((r.text or ""), prompt):
+            from tsutawaru.stt.filters import DROPS
+
+            DROPS["asr-prompt-echo"] += 1
+            r = self._run(audio, "")
         return STTResult(
             (r.text or "").strip(),
             r.language or self.cfg.language,
             1.0,
             NO_LOGPROB,
             NO_SPEECH_PROB,
+        )
+
+    def _run(self, audio: np.ndarray, context: str):
+        return self._ensure_session().transcribe(
+            audio,
+            language=self.cfg.language if self.cfg.lang_mode == "pinned" else None,
+            # Qwen3-ASR takes a free-text biasing context: the fix for the
+            # proper nouns this project keeps mangling. Unlike the claim this
+            # comment used to make, it *is* transcribable — see
+            # PROMPT_ECHO_MIN for how often and what `transcribe` does about it.
+            context=context,
         )
 
     def warmup(self) -> None:

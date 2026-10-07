@@ -323,3 +323,37 @@ def test_whisper_models_are_untouched_by_the_new_branch(monkeypatch):
     eng = factory.build_engine(SttCfg(model="kotoba"))
     assert isinstance(eng, MLXWhisperEngine)
     assert eng.repo == "kaiinui/kotoba-whisper-v2.0-mlx"
+
+
+# ------------------------------------------------------------ prompt echo
+
+
+def test_a_recited_prompt_is_transcribed_again_without_it(engine):
+    """Qwen3-ASR reads its context back out on short clips — measured on 72 of
+    749 recorded clips. The list must never reach the screen as a transcript."""
+    from tsutawaru.stt.filters import DROPS
+
+    names = "ミドリ、ハナ、ソルト、ソラ"
+    eng = engine(initial_prompt="Proper nouns: " + names)
+    eng.warmup()
+    s = eng.made["session"]
+    s.transcribe = lambda audio, **kw: (s.calls.append(kw), types.SimpleNamespace(
+        text=names + "。" if kw["context"] else "はい。", language="ja"))[1]
+    before = DROPS["asr-prompt-echo"]
+
+    assert eng.transcribe(np.zeros(1600, dtype=np.float32)).text == "はい。"
+    assert [c["context"] for c in s.calls[-2:]] == ["Proper nouns: " + names, ""]
+    assert DROPS["asr-prompt-echo"] == before + 1
+
+
+def test_naming_one_or_two_people_is_not_an_echo(engine):
+    """Real speech names a couple of people. That is what the prompt is for."""
+    eng = engine(initial_prompt="Proper nouns: ミドリ、ハナ、ソルト、ソラ")
+    eng.warmup()
+    s = eng.made["session"]
+    s.transcribe = lambda audio, **kw: (s.calls.append(kw), types.SimpleNamespace(
+        text="ソラさんとミドリさんが来た。", language="ja"))[1]
+    n = len(s.calls)
+
+    assert eng.transcribe(np.zeros(1600, dtype=np.float32)).text == "ソラさんとミドリさんが来た。"
+    assert len(s.calls) == n + 1, "a clean transcript must not pay a second pass"

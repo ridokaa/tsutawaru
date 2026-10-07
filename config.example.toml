@@ -86,9 +86,12 @@ compute_type     = "auto"   # float16 | int8_float16 | int8
 no_speech_thresh = 0.6
 logprob_floor    = -1.0
 # Vocabulary priming. Under model="qwen3" this is passed straight through to
-# Qwen3-ASR's context-biasing input, which nudges recognition toward these words
-# without them being transcribable. Whisper prepends it to the decoder history
-# instead and can echo it back, so keep it short under kotoba.
+# Qwen3-ASR's context-biasing input, which nudges recognition toward these words.
+# It can still come back out: on short clips the model sometimes transcribes the
+# whole list instead of the audio (72 of 749 recorded clips with 16 names), and
+# such a clip is transcribed again without it — see qwen_mlx_engine.
+# PROMPT_ECHO_MIN. Whisper prepends it to the decoder history instead and can
+# echo it back with no such guard, so keep it short under kotoba.
 #
 # The FRAMING is load-bearing: lead with "Proper nouns:" or "Technical terms:".
 # A bare comma list reads as text to continue rather than metadata about the
