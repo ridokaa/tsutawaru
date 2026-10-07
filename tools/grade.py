@@ -27,6 +27,12 @@ Usage:
     python tools/grade.py --file path/to/sheet.md
     python tools/grade.py --tally                # print the score, grade nothing
     python tools/grade.py --rows 15,28,3-9       # re-check named rows, answered or not
+    python tools/grade.py --ab --file sheet.md   # blind A/B: which transcript is closer
+
+`--ab` grades a sheet whose JP and EN columns hold two competing versions of the
+same clip, A and B, sides shuffled per row so the grader cannot tell which arm is
+which. The verdict is which one is closer to what the clip says; the key that
+unblinds it lives beside the sheet, not in it.
 """
 from __future__ import annotations
 
@@ -46,6 +52,7 @@ DEFAULT_SHEET = (
 )
 
 VERDICTS = {"j": "J", "e": "E", "ok": "OK", "o": "OK"}
+VERDICTS_AB = {"1": "A", "2": "B", "0": "="}
 
 
 def _spec(s: str) -> set[str]:
@@ -71,6 +78,13 @@ HELP = """
   e   English wrong (MT)        b   back one row
   ok  both fine                 s   skip, decide later
                                 q   save and quit
+"""
+
+HELP_AB = """
+  1   A is closer to the audio      r   replay
+  2   B is closer to the audio      b   back one row
+  0   no difference / both wrong    s   skip, decide later
+                                    q   save and quit
 """
 
 
@@ -142,18 +156,18 @@ def save(path: pathlib.Path, lines: list[str], rows: list[Row]) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def tally(rows: list[Row]) -> dict[str, int]:
-    out = {"J": 0, "E": 0, "OK": 0, "": 0}
+def tally(rows: list[Row], labels=("J", "E", "OK")) -> dict[str, int]:
+    out = {**dict.fromkeys(labels, 0), "": 0}
     for r in rows:
         out[r.verdict if r.verdict in out else ""] += 1
     return out
 
 
-def report(rows: list[Row]) -> None:
+def report(rows: list[Row], labels=("J", "E", "OK")) -> None:
     """J vs E is the whole answer: whichever is larger is the weak half."""
-    t = tally(rows)
-    done = t["J"] + t["E"] + t["OK"]
-    print(f"\n  graded {done}/{len(rows)}   J {t['J']} · E {t['E']} · OK {t['OK']}")
+    t = tally(rows, labels)
+    done = len(rows) - t[""]
+    print(f"\n  graded {done}/{len(rows)}   " + " · ".join(f"{k} {t[k]}" for k in labels))
     if t[""]:
         print(f"  {t['']} row(s) still unanswered — rerun to continue.")
 
@@ -179,8 +193,14 @@ def main() -> int:
                     help="print the current score and exit")
     ap.add_argument("--rows", default="",
                     help="re-grade these rows even if answered, e.g. 15,28,3-9")
+    ap.add_argument("--ab", action="store_true",
+                    help="blind A/B sheet: which of two versions is closer")
     ap.add_argument("--self-check", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
+    verdicts, help_, tags = ((VERDICTS_AB, HELP_AB, ("A", "B")) if args.ab
+                             else (VERDICTS, HELP, ("JP", "EN")))
+    labels = tuple(dict.fromkeys(verdicts.values()))
+    keys = "/".join(verdicts) if args.ab else "j/e/ok"
 
     if args.self_check:
         return _selfcheck()
@@ -196,7 +216,7 @@ def main() -> int:
         return 1
 
     if args.tally:
-        report(rows)
+        report(rows, labels)
         return 0
 
     wav_dir = args.wav_dir or args.file.parent / "wav"
@@ -210,11 +230,11 @@ def main() -> int:
     if not todo:
         print("nothing to grade. Name rows to re-check with --rows 15,28"
               if not want else f"no such row(s): {args.rows}")
-        report(rows)
+        report(rows, labels)
         return 0
 
     print(f"{len(todo)} row(s) to grade in {args.file.name}")
-    print(HELP)
+    print(help_)
 
     pos = 0
     while 0 <= pos < len(todo):
@@ -222,8 +242,8 @@ def main() -> int:
         wav = wav_dir / f"{r.wav}.wav"
         print(f"\n─── {r.num}/{len(rows)}  {r.wav}  conf {r.conf}"
               f"{'' if wav.exists() else '  [wav missing]'}")
-        print(f"  JP  {r.jp}")
-        print(f"  EN  {r.en}")
+        print(f"  {tags[0]:2}  {r.jp}")
+        print(f"  {tags[1]:2}  {r.en}")
         if r.verdict:
             print(f"  (currently {r.verdict})")
         if wav.exists():
@@ -231,14 +251,14 @@ def main() -> int:
 
         while True:
             try:
-                key = input("  [j/e/ok/r/b/s/q] ").strip().lower()
+                key = input(f"  [{keys}/r/b/s/q] ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print()
                 save(args.file, lines, rows)
-                report(rows)
+                report(rows, labels)
                 return 0
-            if key in VERDICTS:
-                r.set(VERDICTS[key])
+            if key in verdicts:
+                r.set(verdicts[key])
                 save(args.file, lines, rows)
                 pos += 1
                 break
@@ -253,12 +273,12 @@ def main() -> int:
                 break
             if key == "q":
                 save(args.file, lines, rows)
-                report(rows)
+                report(rows, labels)
                 return 0
-            print(HELP)
+            print(help_)
 
     save(args.file, lines, rows)
-    report(rows)
+    report(rows, labels)
     return 0
 
 
@@ -282,6 +302,8 @@ def _selfcheck() -> int:
     assert pick("") == ["3"], pick("")
     assert pick("1,2") == ["1", "2"], pick("1,2")
     assert tally(rows) == {"J": 1, "E": 0, "OK": 1, "": 1}, tally(rows)
+    ab = parse(["| 1 | `utt_1` | あ | い | — | A |", "| 2 | `utt_2` | う | え | — | = |"])
+    assert tally(ab, ("A", "B", "=")) == {"A": 1, "B": 0, "=": 1, "": 0}
     print("grade self-check OK")
     return 0
 
