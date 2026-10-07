@@ -203,6 +203,12 @@ class TranslateCfg:
     # consecutive subject flips 63% -> 80%); on a recorded YouTube stream it was
     # graded the winner 19-16. Costs ~90 ms on the lines that use it.
     local_context_lines: int = 3
+    # provider="mlx" only: Japanese spelling -> how to write it in English, for
+    # names. Only the entries found in a line are put in that line's prompt, so
+    # an entry cannot leak into a line that does not contain it — the failure
+    # a fixed example name caused (see local_mlx.NAME_RULE). Pairs with
+    # [stt].initial_prompt, which gets the ASR to spell the name the same way.
+    names: dict[str, str] = field(default_factory=dict)
     gloss_workers: int = 3  # sentence translation gets its own dedicated worker
     sentence_timeout_s: float = 4.0
     token_timeout_s: float = 3.0
@@ -389,6 +395,8 @@ def _build_section(cls, data: dict, name: str):
                 setattr(obj, key, val)
             elif isinstance(getattr(obj, key), list):
                 setattr(obj, key, list(val))
+            elif isinstance(getattr(obj, key), dict):
+                setattr(obj, key, {str(k): str(v) for k, v in dict(val).items()})
             else:
                 setattr(obj, key, _coerce(_basetype(ftype), val, f"[{name}].{key}"))
         except (TypeError, ValueError) as e:

@@ -321,7 +321,7 @@ def _strip_echo(text: str, history) -> str:
     return " ".join(body.split())
 
 
-def _prompt(text: str, history) -> str:
+def _prompt(text: str, history, names=None) -> str:
     """Empty history gives the bare prompt unchanged, not an empty context block.
 
     `history` holds previous *English output*, not Japanese source. That is the
@@ -334,9 +334,16 @@ def _prompt(text: str, history) -> str:
     Pure, so the self-check can exercise it without loading 2.1 GB of weights —
     and so that `local_context_lines = 0` is provably the old bare prompt.
     """
-    if not history:
-        return PROMPT.format(src=text)
-    return CONTEXT_PROMPT.format(ctx="\n".join(history), src=text)
+    p = (CONTEXT_PROMPT if history else PROMPT).format(
+        ctx="\n".join(history), src=text)
+    # Only the names this line contains: an entry in a prompt is a one-shot
+    # example, and one the line does not contain gets copied in (NAME_RULE, 1).
+    hits = [(jp, en) for jp, en in (names or {}).items() if jp in text]
+    if not hits:
+        return p
+    cut = len(text) + 3  # "\n\n " + text always ends both templates
+    return (p[:-cut] + " Spell these names exactly as given: "
+            + ", ".join(f"{jp} = {en}" for jp, en in hits) + "." + p[-cut:])
 
 
 class LocalTranslator(Translator):
@@ -367,6 +374,7 @@ class LocalTranslator(Translator):
         # two lanes cannot interleave it either.
         self.lock = threading.Lock()
         self.max_context = max(0, cfg.local_context_lines)
+        self.names = dict(cfg.names)
         # Empty until a source says otherwise. `set_context(True)` turns it on;
         # nothing does that for a call, which is the whole point.
         self.history: collections.deque = collections.deque(maxlen=0)
@@ -424,7 +432,7 @@ class LocalTranslator(Translator):
         """
         from mlx_lm import generate
 
-        msg = [{"role": "user", "content": _prompt(src, history)}]
+        msg = [{"role": "user", "content": _prompt(src, history, self.names)}]
         return generate(
             self.model, self.tok, self._chat(msg),
             max_tokens=MAX_TOKENS, sampler=self.sampler, verbose=False,
@@ -521,6 +529,15 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.local_ml
     # reason the next time it is.
     for p_ in (_prompt("ねこ", []), _prompt("ねこ", ["A."])):
         assert NAME_RULE in p_, "the name rule fell out of a branch"
+
+    # Names: only the ones in the line, placed before it, and a line with none
+    # is the plain prompt byte for byte.
+    nm = {"ミドリ": "Midori", "ハナ": "Hana"}
+    assert _prompt("ねこ", [], nm) == PROMPT.format(src="ねこ")
+    for h in ([], ["A."]):
+        pn = _prompt("ミドリさん来た", h, nm)
+        assert "ミドリ = Midori" in pn and "Hana" not in pn, pn
+        assert pn.endswith("\n\n ミドリさん来た"), pn
 
     p = _prompt("ねこ", ["The dog barked.", "So did the bird.", "Then a fish."])
     assert p.count("ねこ") == 1, "target line must not also sit in the context"

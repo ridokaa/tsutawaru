@@ -154,6 +154,13 @@ sentence_timeout_s = 4.0
 token_timeout_s    = 3.0
 lru_size           = 20000
 persist_cache      = true
+# provider="mlx" only: how to write each name in the English. Japanese on the
+# left, matched exactly, so list every spelling the ASR actually produces. Only
+# the names a line contains go into that line's prompt. Put real names in
+# config.toml, which git ignores, never here:
+# [translate.names]
+# "ミドリ" = "Midori"
+# "みどり" = "Midori"
 
 [ui]
 sink           = "window"   # "window" (tsutawaru GUI) | "console" | "overlay"
