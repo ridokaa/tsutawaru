@@ -27,6 +27,21 @@ from tsutawaru.pipeline.queues import ui_q
 log = get_logger(__name__)
 
 WINDOW_TITLE = "tsutawaru"
+# The startup banner, shown until the first line lands. Plain ASCII on purpose:
+# the window is already full of Japanese, so the one thing on screen before any
+# audio arrives should need no font support at all.
+#
+# A box rather than a figlet wordmark, which is what this started as. Rendered,
+# every figlet style tried — outline, standard, slant, chunky, shadow — came out
+# as mush: their glyphs are built from one-character strokes, and at a size that
+# fits the lane those strokes blur into each other. Raising it to 20px resolved
+# the letters and overflowed the window instead. A box has no fine detail to
+# lose, so it reads at 13px.
+#
+# 23 columns at 13px Menlo is ~180px, well inside the 500px minimum width.
+BANNER = r"""+---------------------+
+|  t s u t a w a r u  |
++---------------------+"""
 POLL_MS = 100          # how often the Qt thread drains ui_q
 STICKY_BOTTOM_PX = 40  # treat "within 40px of the end" as pinned to the bottom
 # How wide the text column is allowed to get, whatever the window does. Measured
@@ -186,7 +201,6 @@ body { background:#0f1115; color:#e8e8ea;
 .abcell { padding:0 10px 0 0; }
 .abcell.b { padding:0 0 0 12px; border-left:2px solid #2b303b; }
 .empty   { padding:22px 4px; }
-.etitle  { color:#8b93a5; font-size:15px; font-weight:600; margin-bottom:6px; }
 .esub    { color:#5a6172; font-size:13px; line-height:1.5; margin-bottom:16px; }
 .ehint   { color:#4a5060; font-size:12px; line-height:1.5;
            border-left:2px solid #2a2f3a; padding-left:10px; }
@@ -196,6 +210,14 @@ body { background:#0f1115; color:#e8e8ea;
     # constants: the tests sample the rail in pixels and compare against these.
     f".rail     {{ background-color:{RAIL_FINAL}; }}\n"
     f".railwait {{ background-color:{RAIL_PENDING}; }}\n"
+    # The startup banner. Monospace is not decoration here — the art is columns,
+    # and a proportional face turns it into noise, which is the same trap the .jp
+    # rule above records. Measured: Qt resolves the family and size inside a
+    # <pre> and lays the rows out on its own pitch, no line-height needed. Rail
+    # blue rather than a fifth colour, so the idle screen uses the palette it
+    # already has.
+    f".art {{ color:{RAIL_FINAL}; font-family:'Menlo','SF Mono',monospace;\n"
+    "        font-size:13px; margin-bottom:14px; }\n"
 )
 
 # Appended to _CSS for the live lane only, so the card being spoken reads as the
@@ -252,26 +274,18 @@ def _empty_state(device: str, source: str = "") -> str:
                       somewhere other than the system default: still perfectly
                       audible, captured as pure silence.
     """
-    dev = html.escape(device or "…")
+    dev = html.escape(device or "...")
+    art = html.escape(BANNER)
     if source:
-        hint = (
-            f"Nothing yet? A tap only captures while {dev} is actually playing, "
-            f"so silence here is normal between turns. If {dev} <i>is</i> audible "
-            "and nothing appears, its output is set to a different device than "
-            "your system output — apps with their own output picker sit outside "
-            "the tap and record silence."
-        )
+        hint = (f"Nothing yet? Check that {dev} plays to your system output. "
+                "An app pointed at another device records as silence.")
     else:
-        hint = (
-            "Nothing showing up? macOS switches your system output away whenever "
-            "you plug or unplug headphones — reselect your Multi-Output Device "
-            "from the menu bar sound icon."
-        )
+        hint = ("Nothing yet? Plugging headphones in or out resets the system "
+                "output. Reselect your Multi-Output Device.")
     return (
         '<div class="empty">'
-        '<div class="etitle">Listening…</div>'
-        f'<div class="esub">Capturing from <b>{dev}</b>. '
-        "Japanese speech will appear here.</div>"
+        f'<pre class="art">{art}</pre>'
+        f'<div class="esub">Listening on <b>{dev}</b></div>'
         f'<div class="ehint">{hint}</div>'
         "</div>"
     )
@@ -612,7 +626,7 @@ try:
 
             self.status = self.statusBar()
             self.status.setStyleSheet("color:#7d8595;background:#0f1115;")
-            self.status.showMessage("starting…")
+            self.status.showMessage("starting...")
 
             pal = self.palette()
             pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor("#0f1115"))
@@ -699,7 +713,7 @@ try:
                 b.setChecked(k == key)
                 b.setEnabled(False)
             self._set_title(key)
-            self.src_note.setText("switching…")
+            self.src_note.setText("switching...")
 
             def _work():
                 try:
@@ -1272,7 +1286,7 @@ class WindowSink:
         snap = metrics.snapshot()
         if self._seen_total == 0:
             dev = self.device_name or "audio device"
-            return f"listening on {dev} — no speech yet"
+            return f"listening on {dev} - no speech yet"
         bits = [f"{self._seen_total} lines"]
         if "stt" in snap:
             bits.append(f"stt {snap['stt']['p50']:.0f}ms")

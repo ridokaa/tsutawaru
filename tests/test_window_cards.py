@@ -299,3 +299,34 @@ def test_a_declined_translation_settles_instead_of_reading_as_pending(qapp):
     assert seg.dropped, "a declined line still claims to be pending"
     assert not seg.partial
     assert "no translation" in _fmt_block(seg, UiCfg())
+
+
+def test_the_startup_banner_keeps_its_columns(qapp):
+    """ASCII art is columns, and a proportional face turns it into noise.
+
+    This is the .jp bug in another costume: the rule naming the family is the
+    only thing holding the art together, and nothing about the rendered page
+    would look broken enough to notice in a diff. So the check is what Qt
+    resolved — a fixed-pitch font — plus the rows arriving intact, which is what
+    a missing <pre> would quietly destroy.
+    """
+    from tsutawaru.ui.window_qt import BANNER, _empty_state
+
+    doc = QtGui.QTextDocument()
+    doc.setDefaultStyleSheet(_CSS)
+    doc.setTextWidth(WIDTH)
+    doc.setHtml(f"<body>{_empty_state('BlackHole 2ch')}</body>")
+
+    rows = BANNER.split("\n")
+    art, block = [], doc.begin()
+    while block.isValid():
+        if block.text() in rows:
+            font = block.begin().fragment().charFormat().font()
+            assert QtGui.QFontInfo(font).fixedPitch(), (
+                f"banner row fell back to {font.family()!r}, a proportional face"
+            )
+            art.append(block.text())
+        block = block.next()
+    assert art == rows, "the banner did not survive into the document intact"
+    assert len({len(r) for r in rows}) == 1, "the box rows are ragged"
+    assert BANNER.isascii()
