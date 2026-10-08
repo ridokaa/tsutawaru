@@ -33,11 +33,24 @@ Usage:
 same clip, A and B, sides shuffled per row so the grader cannot tell which arm is
 which. The verdict is which one is closer to what the clip says; the key that
 unblinds it lives beside the sheet, not in it.
+
+`--key` writes an answer key instead of a verdict: for each clip of the sheet,
+who the line is about and the English that is right, picked from the versions
+already translated (shown unlabelled, shuffled) or typed — pasted and fixed for
+a near-miss. (Pre-filling the line for editing was tried; macOS's libedit
+readline ignores it.) A verdict only ranks the two outputs it saw; the key
+scores any future output too, with tools/score.py, so a translator change no
+longer needs a new sheet.
+
+    python tools/grade.py --key                  # the 40-row sheet, resume
+    python tools/grade.py --key --rows 5,30      # redo named rows
 """
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
+import random
 import shutil
 import subprocess
 import sys
@@ -51,8 +64,14 @@ DEFAULT_SHEET = (
     / "accuracy-check.md"
 )
 
+CANDIDATES = DEFAULT_SHEET.parents[2] / "reports" / "frag-eval-20261007.json"
+
 VERDICTS = {"j": "J", "e": "E", "ok": "OK", "o": "OK"}
 VERDICTS_AB = {"1": "A", "2": "B", "0": "="}
+# Who the line is about. Japanese usually leaves it unsaid, and filling it in
+# wrongly is the translator's most common error, so it is decided before the
+# English is chosen. "skip" keeps a clip out of scoring (bad Japanese, no idea).
+SUBJECTS = {"n": "none", "m": "me", "y": "you", "o": "other", "x": "skip"}
 
 
 def _spec(s: str) -> set[str]:
@@ -85,6 +104,18 @@ HELP_AB = """
   2   B is closer to the audio      b   back one row
   0   no difference / both wrong    s   skip, decide later
                                     q   save and quit
+"""
+
+
+HELP_KEY = """
+  Who is the line about?
+  n   no one — it, the situation      m   the speaker (I, we)
+  y   the listener (you)              o   someone else, named or not
+  x   can't tell / Japanese is wrong — leave the clip out
+  r   replay   b   back one   s   skip for now   q   save and quit
+
+  Then the English: a number takes that version as it is; anything else
+  is taken as the English itself (paste a version and fix it to correct one).
 """
 
 
@@ -195,6 +226,10 @@ def main() -> int:
                     help="re-grade these rows even if answered, e.g. 15,28,3-9")
     ap.add_argument("--ab", action="store_true",
                     help="blind A/B sheet: which of two versions is closer")
+    ap.add_argument("--key", action="store_true",
+                    help="write the answer key: who each line is about, and the right English")
+    ap.add_argument("--candidates", type=pathlib.Path, default=CANDIDATES,
+                    help="JSON {arm: {wav: english}} offered as starting points in --key")
     ap.add_argument("--self-check", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
     verdicts, help_, tags = ((VERDICTS_AB, HELP_AB, ("A", "B")) if args.ab
@@ -224,6 +259,9 @@ def main() -> int:
     if player is None:
         print("  no audio player found (afplay/aplay) — grading from text only\n")
 
+    if args.key:
+        return key_mode(args, rows, wav_dir, player)
+
     want = _spec(args.rows)
     todo = [i for i, r in enumerate(rows)
             if (r.num in want if want else not r.verdict)]
@@ -240,8 +278,12 @@ def main() -> int:
     while 0 <= pos < len(todo):
         r = rows[todo[pos]]
         wav = wav_dir / f"{r.wav}.wav"
-        print(f"\n─── {r.num}/{len(rows)}  {r.wav}  conf {r.conf}"
-              f"{'' if wav.exists() else '  [wav missing]'}")
+        # In an A/B sheet the conf column carries the source line both sides
+        # translate, since a verdict on two Englishes needs the Japanese.
+        print(f"\n─── {r.num}/{len(rows)}  {r.wav}" + ("" if args.ab else f"  conf {r.conf}")
+              + ("" if wav.exists() else "  [wav missing]"))
+        if args.ab and r.conf not in ("", "—"):
+            print(f"  JP  {r.conf}")
         print(f"  {tags[0]:2}  {r.jp}")
         print(f"  {tags[1]:2}  {r.en}")
         if r.verdict:
@@ -282,6 +324,68 @@ def main() -> int:
     return 0
 
 
+def versions(cands: dict, wav: str) -> list[str]:
+    """Every distinct English already produced for a clip, in an order that
+    says nothing about which arm made it. Seeded by the clip so going back
+    shows the same numbering."""
+    out = list(dict.fromkeys(v[wav].strip() for v in cands.values() if (v.get(wav) or "").strip()))
+    random.Random(wav).shuffle(out)
+    return out
+
+
+def key_mode(args, rows: list[Row], wav_dir: pathlib.Path, player: str | None) -> int:
+    path = args.file.parent / "answer-key.json"
+    key = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    cands = json.loads(args.candidates.read_text(encoding="utf-8")) if args.candidates.exists() else {}
+    save_key = lambda: path.write_text(json.dumps(key, ensure_ascii=False, indent=1), encoding="utf-8")
+    want = _spec(args.rows)
+    todo = [r for r in rows if (r.num in want if want else r.wav not in key)]
+    print(f"{len(todo)} clip(s) to key, {len(key)} already in {path.name}")
+    print(HELP_KEY)
+    pos = 0
+    while 0 <= pos < len(todo):
+        r = todo[pos]
+        wav = wav_dir / f"{r.wav}.wav"
+        opts = versions(cands, r.wav) or [r.en]
+        print(f"\n─── {r.num}/{len(rows)}  {r.wav}" + ("" if wav.exists() else "  [wav missing]"))
+        print(f"  JP  {r.jp}")
+        for i, v in enumerate(opts, 1):
+            print(f"  {i}   {v}")
+        if r.wav in key:
+            print(f"  (currently {key[r.wav]['subject']}: {key[r.wav].get('en', '')})")
+        if wav.exists():
+            play(wav, player)
+        try:
+            while True:
+                k = input(f"  [{'/'.join(SUBJECTS)}/r/b/s/q] ").strip().lower()
+                if k in SUBJECTS or k in ("b", "s", "q"):
+                    break
+                play(wav, player) if k == "r" and wav.exists() else print(HELP_KEY)
+            if k == "q":
+                break
+            if k in ("b", "s"):
+                pos = max(0, pos - 1) if k == "b" else pos + 1
+                continue
+            entry = {"jp": r.jp, "subject": SUBJECTS[k]}
+            while k != "x":
+                pick = input("  English (number, or type it): ").strip()
+                if pick.isdigit() and 1 <= int(pick) <= len(opts):
+                    pick = opts[int(pick) - 1]
+                if pick:
+                    entry["en"] = pick
+                    break
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        key[r.wav] = entry
+        save_key()
+        pos += 1
+    save_key()
+    done = sum(r.wav in key for r in rows)
+    print(f"\n  keyed {done}/{len(rows)} clips of {args.file.name} → {path}")
+    return 0
+
+
 def _selfcheck() -> int:
     assert _spec("") == set()
     assert _spec("15,28") == {"15", "28"}
@@ -304,6 +408,10 @@ def _selfcheck() -> int:
     assert tally(rows) == {"J": 1, "E": 0, "OK": 1, "": 1}, tally(rows)
     ab = parse(["| 1 | `utt_1` | あ | い | — | A |", "| 2 | `utt_2` | う | え | — | = |"])
     assert tally(ab, ("A", "B", "=")) == {"A": 1, "B": 0, "=": 1, "": 0}
+    # Duplicates collapse, blanks drop, and the order is stable per clip.
+    c = {"x": {"u1": "Hi.", "u2": ""}, "y": {"u1": " Hi. "}, "z": {"u1": "Hello."}}
+    assert sorted(versions(c, "u1")) == ["Hello.", "Hi."] and versions(c, "u1") == versions(c, "u1")
+    assert versions(c, "u2") == [] and versions(c, "u3") == []
     print("grade self-check OK")
     return 0
 
