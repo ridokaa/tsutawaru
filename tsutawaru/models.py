@@ -97,6 +97,7 @@ class Segment:
     continued: bool = False  # follows a forced flush — same speaker turn
     t_audio_end: float = 0.0
     t_stt_done: float = 0.0
+    t_english: float = 0.0
     t_complete: float = 0.0
     partial: bool = True
     # A second ASR model's reading of the *same* audio. Empty `alt_model` means
@@ -128,6 +129,10 @@ class Segment:
         the tier off will show a lower `line_ms` for the same pipeline, because
         it is measuring a shorter thing. Check which mode a session ran in
         before putting its figures beside another's.
+        `en_ms` is the one a reader feels: end of speech to the English being
+        ready, queue waits included, whatever the breakdown tier is doing. All
+        three start where the VAD *closed* the utterance, so the speaker went
+        quiet `vad.hangover_ms` earlier than that.
         0.0 is the unset marker, so a stage never reached reports None.
         """
 
@@ -137,6 +142,7 @@ class Segment:
         return {
             "stt_ms": ms(self.t_audio_end, self.t_stt_done),
             "line_ms": ms(self.t_audio_end, self.t_complete),
+            "en_ms": ms(self.t_audio_end, self.t_english),
         }
 
     def to_dict(self) -> dict:

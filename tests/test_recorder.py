@@ -177,15 +177,18 @@ def test_timing_measures_from_end_of_speech():
     than a short one purely for being long, which is not the question anyone is
     asking of this pipeline.
     """
-    t = _timed("あ", audio_end=100.0, stt=100.4, done=101.2).timing()
+    s = _timed("あ", audio_end=100.0, stt=100.4, done=101.2)
+    s.t_english = 100.9
+    t = s.timing()
     assert t["stt_ms"] == 400.0
     assert t["line_ms"] == 1200.0
+    assert t["en_ms"] == 900.0
 
 
 def test_timing_reports_nothing_for_stages_never_reached():
     """0.0 is the unset marker, not a reading — monotonic zero is arbitrary."""
     t = _seg("あ").timing()
-    assert t == {"stt_ms": None, "line_ms": None}
+    assert t == {"stt_ms": None, "line_ms": None, "en_ms": None}
 
 
 def test_timing_reaches_the_recorded_line(tmp_path):

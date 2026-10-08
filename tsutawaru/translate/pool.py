@@ -99,6 +99,9 @@ class TranslationPool:
         except Exception as e:
             seg.english = f"[translation unavailable: {type(e).__name__}]"
         metrics.record("xlate_sentence", (time.perf_counter() - t0) * 1000)
+        seg.t_english = time.monotonic()
+        if seg.t_audio_end:  # end of speech -> English, queue waits included
+            metrics.record("speech_to_en", (seg.t_english - seg.t_audio_end) * 1000)
         ui_q.put(("english", seg))
         if not seg.english:
             # The backend returned nothing: a guard in local_mlx rejected the
@@ -220,6 +223,7 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.pool
     assert seg.english == "<ねこ>", seg.english
     assert seg.partial is False, "line left pending with the gloss lane skipped"
     assert seg.t_complete > 0, "line_ms would never get an end point"
+    assert seg.t_english > 0, "en_ms would never get an end point"
     assert "breakdown" in seen, "--log-file waits on this event before writing"
     assert seg.tokens[0].gloss is None, "skipped glosses must stay None, not ''"
 
