@@ -286,7 +286,9 @@ def test_a_declined_translation_settles_instead_of_reading_as_pending(qapp):
     the same ambiguity the stranded-provisional fix exists to remove."""
     from tsutawaru.translate.pool import TranslationPool
 
-    seg = Segment.new(stream="t", original="Ｘ Ｙ Ｚ。", romaji="X Y Z")
+    # Japanese: a line with none never reaches the translator (pool.py passes
+    # it through), so it could not be declined.
+    seg = Segment.new(stream="t", original="ほげほげ。", romaji="hogehoge")
     seg.english = ""
 
     pool = TranslationPool.__new__(TranslationPool)

@@ -8,6 +8,7 @@ from tsutawaru.config import TranslateCfg
 from tsutawaru.logbus import metrics
 from tsutawaru.models import Segment
 from tsutawaru.pipeline.queues import ui_q
+from tsutawaru.stt.filters import has_japanese
 from tsutawaru.translate.base import Translator
 from tsutawaru.translate.cache import GlossCache
 from tsutawaru.translate.jmdict import gloss as jmdict_gloss
@@ -95,7 +96,10 @@ class TranslationPool:
         t0 = time.perf_counter()
         backend = self.backend  # read once, so one job uses one backend
         try:
-            seg.english = backend.sentence(seg.original)
+            # Already English (or a number): the translator can only rewrite
+            # it, and on recorded sessions it did — adding words and names.
+            seg.english = (backend.sentence(seg.original) if has_japanese(seg.original)
+                           else seg.original.strip())
         except Exception as e:
             seg.english = f"[translation unavailable: {type(e).__name__}]"
         metrics.record("xlate_sentence", (time.perf_counter() - t0) * 1000)
@@ -226,6 +230,12 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.pool
     assert seg.t_english > 0, "en_ms would never get an end point"
     assert "breakdown" in seen, "--log-file waits on this event before writing"
     assert seg.tokens[0].gloss is None, "skipped glosses must stay None, not ''"
+
+    pool = TranslationPool(_Stub(), GlossCache(8, persist=False), TranslateCfg())
+    seg = Segment.new(stream="test", original=" Good luck, everyone ")
+    pool._sentence(seg, True)
+    assert seg.english == "Good luck, everyone", "English speech must pass through untranslated"
+    _drain()
 
     seg, seen = _run(glosses=True)
     assert seg.partial is False and seg.t_complete > 0

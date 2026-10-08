@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import collections
+import re
+import unicodedata
 
 
 HALLUCINATIONS = {
@@ -50,6 +52,25 @@ PEAK_FLOOR_RATIO = 0.16
 PEAK_REF_MIN_SAMPLES = 20
 
 
+# Japanese script: kana (full and half width), kanji, and their marks.
+_JAPANESE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f々〆]")
+# A word: two letters in a row, or a digit. What is left without one is
+# punctuation or separate letters ("。", "Q Z。", "B. V.").
+_WORD = re.compile(r"[A-Za-z]{2}|\d")
+
+
+def has_japanese(text: str) -> bool:
+    """Whether a line holds any Japanese at all.
+
+    Over 4,531 recorded lines, 30 had none. Most were English actually spoken
+    (a streamer addressing viewers), so "no Japanese" is not junk on its own —
+    those are passed through untranslated (see translate/pool.py). The 7 that
+    also had no word are dropped as "no-words"; the translator had invented a
+    sentence for several of them ("。" -> a question three times).
+    """
+    return bool(_JAPANESE.search(text))
+
+
 #: Why utterances were discarded this run, by reason. Not locked: the pipeline
 #: runs exactly one `_stt_worker` and it is the only writer, the same
 #: single-consumer assumption `QwenMLXEngine._ensure_session` relies on. A lock
@@ -80,6 +101,8 @@ def drop_reason(text: str, result=None, cfg=None, peak: float | None = None,
         return "empty"
     if t in HALLUCINATIONS:
         return "wordlist"
+    if not has_japanese(t) and not _WORD.search(unicodedata.normalize("NFKC", t)):
+        return "no-words"
     if t in SHORT_AMBIGUOUS:
         if peak is not None and peak_ref:
             if peak < PEAK_FLOOR_RATIO * peak_ref:
@@ -123,6 +146,12 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.stt.filters
         ("", None, None, {}, "empty"),
         ("   ", None, None, {}, "empty"),
         ("ご視聴ありがとうございました", None, None, {}, "wordlist"),
+        ("。", None, None, {}, "no-words"),
+        ("Q Z。", None, None, {}, "no-words"),
+        ("B. V.", None, None, {}, "no-words"),
+        ("OK", None, None, {}, None),            # English speech is kept
+        ("ＯＫ", None, None, {}, None),          # full width too
+        ("12。", None, None, {}, None),          # so is a number
         ("はい", _R(), None, {"peak": 0.01, "peak_ref": 0.73}, "peak-gate"),
         ("はい", _R(ns=0.9), None, {}, "no-speech"),
         ("はい", _R(lp=-1.5), None, {}, "low-confidence"),
@@ -146,7 +175,7 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.stt.filters
         r = drop_reason(text, res, cfg, **kw)
         if r:
             DROPS[r] += 1
-    assert drops() == {"empty": 2, "wordlist": 1, "peak-gate": 1, "no-speech": 1,
+    assert drops() == {"empty": 2, "wordlist": 1, "no-words": 3, "peak-gate": 1, "no-speech": 1,
                        "low-confidence": 1, "single-char": 2, "repetition": 1}, drops()
     DROPS.clear()
 
