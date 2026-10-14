@@ -21,21 +21,17 @@ sample; until they have, both models are hypotheses.
 What it costs
 -------------
 Qwen3-ASR is a decoder-only ASR LLM, not a Whisper variant. It reports no
-`avg_logprob` and no `no_speech_prob`, and it has no `no_speech_threshold` of
-its own. Three branches of stt/filters.py and the decoder's own silence gate all
-key on those numbers, so selecting this model silently disarms them.
+`no_speech_prob` and has no `no_speech_threshold` of its own, so the no-speech
+branches of stt/filters.py abstain under it. The peak-amplitude gate, computed
+from the waveform in the orchestrator, keeps working.
 
-The honest size of that loss is smaller than it sounds, and it was measured:
-across the 2026-08-22 session the confirmed-junk clips ran avg_logprob
--0.87..-0.35, so neither the -0.9 short-utterance gate nor the -1.0
-`logprob_floor` ever fired on a single one of them. What actually removed junk
-was the peak-amplitude gate, which is computed from the waveform in the
-orchestrator and is entirely independent of the engine. It keeps working here.
-
-So the branches this disarms were already inert under kotoba. That is the
-argument for accepting the loss — not that confidence does not matter, but that
-on this project's own data it was not doing the work. The engine says so out
-loud at startup rather than letting it be discovered later.
+The library reports no `avg_logprob` either, but it scores every token before
+picking one, so `_hook_logprobs` keeps that score and the engine reports the
+mean as `avg_logprob`. Measured on the 600 clips of the 2026-08-22 call: the
+lowest-scored lines are the misheard ones (an OK/E sheet row outscores a J row
+83% of the time; 78–87% within each line-length band), and at the shipped
+floors 6 lines (1%) are dropped and 44 (7%) dimmed, against a kotoba-whisper
+disagreement rate of 83% and 86% there versus 36% overall.
 """
 from __future__ import annotations
 
@@ -69,6 +65,41 @@ REPO = {
 # threshold would silently discard real speech.
 NO_LOGPROB = 0.0
 NO_SPEECH_PROB = -1.0
+
+# Log-probability of each token the library picks, for the utterance in flight.
+# ponytail: one module-level list, safe because the pipeline runs exactly one
+# STT worker (see _ensure_session); a second engine in one process would need
+# its own.
+_LOGPROBS: list[float] = []
+
+
+def _hook_logprobs() -> bool:
+    """Wrap mlx_qwen3_asr's token picker so each pick's log-probability is kept.
+
+    The library computes the full distribution for every token and keeps only
+    the argmax; there is no API for the score. `generate._sample` is private,
+    which is why requirements-mac.txt pins the exact version. If it moves, the
+    engine falls back to NO_LOGPROB and says so, rather than failing the call.
+    """
+    try:
+        import mlx.core as mx
+        import mlx_qwen3_asr.generate as gen
+
+        pick = gen._sample
+    except (ImportError, AttributeError):
+        return False
+    if getattr(pick, "keeps_logprob", False):
+        return True
+
+    def _sample(logits, temperature):
+        tok = pick(logits, temperature)
+        flat = logits.reshape(-1).astype(mx.float32)
+        _LOGPROBS.append((flat[tok] - mx.logsumexp(flat)).item())
+        return tok
+
+    _sample.keeps_logprob = True
+    gen._sample = _sample
+    return True
 
 
 
@@ -138,11 +169,9 @@ class QwenMLXEngine(STTEngine):
         self.session = None
         # Said once, at startup: which filters this model turns off.
         log.warning(
-            "[stt] %s reports no avg_logprob or no_speech_prob — "
-            "logprob_floor=%.2f and no_speech_thresh=%.2f are inert for this "
-            "run. Hallucination filtering falls back to the wordlist, the "
-            "repetition test and the peak-amplitude gate.",
-            cfg.model, cfg.logprob_floor, cfg.no_speech_thresh,
+            "[stt] %s reports no no_speech_prob — no_speech_thresh=%.2f is "
+            "inert for this run; the peak-amplitude gate still runs.",
+            cfg.model, cfg.no_speech_thresh,
         )
 
     def _ensure_session(self):
@@ -156,6 +185,11 @@ class QwenMLXEngine(STTEngine):
         if self.session is None:
             from mlx_qwen3_asr import Session
 
+            if not _hook_logprobs():
+                log.warning(
+                    "[stt] could not read %s's token scores (mlx-qwen3-asr "
+                    "changed?) — logprob_floor and the unsure dimming are inert "
+                    "for this run.", self.cfg.model)
             self.session = Session(self.repo)
         return self.session
 
@@ -167,15 +201,20 @@ class QwenMLXEngine(STTEngine):
 
             DROPS["asr-prompt-echo"] += 1
             r = self._run(audio, "")
+        # The last pick is the end-of-text token, which says nothing about the
+        # words. Measured with the language pinned; under "detect" the
+        # "language Japanese" prefix is scored too, and dilutes the mean.
+        lps = _LOGPROBS[:-1]
         return STTResult(
             (r.text or "").strip(),
             r.language or self.cfg.language,
             1.0,
-            NO_LOGPROB,
+            sum(lps) / len(lps) if lps else NO_LOGPROB,
             NO_SPEECH_PROB,
         )
 
     def _run(self, audio: np.ndarray, context: str):
+        _LOGPROBS.clear()
         return self._ensure_session().transcribe(
             audio,
             language=self.cfg.language if self.cfg.lang_mode == "pinned" else None,

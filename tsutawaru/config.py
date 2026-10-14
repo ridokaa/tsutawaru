@@ -233,8 +233,8 @@ class UiCfg:
     # weaker band above it, where the transcript is worth showing but not worth
     # believing. Keep it above that floor or it can never fire.
     #
-    # Per-model and per-mic — retune when you swap backends. INERT under either
-    # qwen3 model, which reports no avg_logprob at all (see [stt].model).
+    # Per-model and per-mic — retune when you swap backends. Under qwen3, -0.6
+    # dims about 7% of call lines (see stt/qwen_mlx_engine.py).
     confidence_floor: float = -0.6
 
 

@@ -7,10 +7,11 @@ opt in explicitly; a config nobody touched still builds kotoba-whisper. That is
 the whole revert story, so it gets a test rather than a comment.
 
 The second is what happens to the confidence filters. Qwen3-ASR reports no
-avg_logprob and no no_speech_prob, and stt/filters.py has three branches plus a
-decoder threshold that key on those numbers. The engine therefore reports
-documented "not reported" sentinels — and a sentinel is only safe if every one
-of those branches abstains on it. A value that happened to sit the wrong side
+no_speech_prob, and avg_logprob only when the engine can read the library's token
+scores, and stt/filters.py has three branches plus a decoder threshold that key
+on those numbers. When a value is missing the engine reports a documented "not
+reported" sentinel — and a sentinel is only safe if every one of those branches
+abstains on it. A value that happened to sit the wrong side
 of a threshold would discard real speech on every line, silently, and the
 transcript would simply be shorter than the conversation. That is the failure
 these tests exist to make impossible.
@@ -219,12 +220,39 @@ def test_language_is_pinned_or_left_to_detection(engine):
     assert eng.made["session"].calls[0]["language"] is None
 
 
-def test_the_confidence_loss_is_announced_at_startup(engine, caplog):
+def test_the_confidence_loss_is_announced_at_startup(engine, caplog, monkeypatch):
     """Discovering this from a thin transcript weeks later would be worse."""
+    monkeypatch.delitem(sys.modules, "mlx_qwen3_asr.generate", raising=False)
     with caplog.at_level("WARNING"):
-        engine()
-    assert "no avg_logprob" in caplog.text
+        eng = engine()
+    assert "no_speech_thresh" in caplog.text
+    # The stub has no token picker to wrap: said at load, and the line falls
+    # back to the sentinel instead of failing.
+    with caplog.at_level("WARNING"):
+        r = eng.transcribe(np.zeros(16000, dtype=np.float32))
     assert "logprob_floor" in caplog.text
+    from tsutawaru.stt.qwen_mlx_engine import NO_LOGPROB
+    assert r.avg_logprob == NO_LOGPROB
+
+
+def test_the_token_scores_become_avg_logprob(engine, monkeypatch):
+    """The mean log-probability of the picked tokens, end-of-text left out."""
+    import math
+    mx = pytest.importorskip("mlx.core")
+    gen = types.ModuleType("mlx_qwen3_asr.generate")
+    gen._sample = lambda logits, t: int(mx.argmax(logits.reshape(-1)).item())
+    monkeypatch.setitem(sys.modules, "mlx_qwen3_asr.generate", gen)
+    eng = engine()
+    eng.transcribe(np.zeros(16000, dtype=np.float32))  # loads, and wraps gen
+    picks = [[0.0, 0.0], [0.0, -100.0], [0.0, 0.0]]  # a coin flip, a sure pick, end
+    eng.made["session"].transcribe = lambda audio, **kw: (
+        [gen._sample(mx.array(lg), 0.0) for lg in picks],
+        types.SimpleNamespace(text="はい", language="ja"))[1]
+    r = eng.transcribe(np.zeros(16000, dtype=np.float32))
+    assert r.avg_logprob == pytest.approx(math.log(0.5) / 2, abs=1e-4)
+    # Every utterance starts from its own tokens, not the last one's.
+    r = eng.transcribe(np.zeros(16000, dtype=np.float32))
+    assert r.avg_logprob == pytest.approx(math.log(0.5) / 2, abs=1e-4)
 
 
 # ------------------------------------------------------- MLX thread affinity

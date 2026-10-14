@@ -36,7 +36,7 @@ Built to follow Japanese friends in Discord voice calls in real time, and to lea
 **Known weaknesses**, in the order they are being worked on:
 
 1. **Short fragments.** Japanese often leaves out who is speaking. On a fragment, the translator completes a full English sentence and fills in a subject, usually "I", that the speaker never said. On those same 11 hard lines the English was wrong on 8 (a sample picked because it looked suspicious, so not an error rate).
-2. **No doubt signal.** Qwen3-ASR reports no confidence score, so the "unsure" dimming and two hallucination filters do nothing under it. Unclear audio comes out as fluent English that looks exactly like a correct line.
+2. **A weak doubt signal.** Lines the speech recognition was unsure of are dimmed and tagged "unsure" (about 7% of call lines), and the least certain 1% are dropped. Checked against a second recogniser and the graded lines, not yet by watching it live.
 3. **No end-to-end latency figure.** The numbers above are per stage; time spent waiting in queues is not measured yet.
 4. **Very loud game audio.** On the loudest stream tested, the voice detector misses about 19% of speech starts.
 

@@ -75,9 +75,10 @@ backend          = "auto"   # "auto" | "mlx" | "faster"
 # one, averaging 0.720 against qwen3's 0.336 in a single run of all three arms.
 # See mlx_whisper_engine.REPO for the table. It is selectable, not recommended.
 #
-# Qwen3-ASR reports no avg_logprob and no no_speech_prob, so no_speech_thresh
-# and logprob_floor below are INERT under either qwen3 model. Measured cost of
-# losing them: 0.005 CER. They apply again under any Whisper model.
+# Qwen3-ASR reports no no_speech_prob, so no_speech_thresh below is INERT under
+# either qwen3 model. logprob_floor applies to both families, but the scales
+# differ: under qwen3 it is the mean token log-probability, and -1.0 drops about
+# 1% of call lines, nearly all misheard (see qwen_mlx_engine).
 model            = "qwen3"
 language         = "ja"
 lang_mode        = "pinned" # "pinned" | "detect"
@@ -180,5 +181,5 @@ log_file       = ""
 # Lines the ASR scored below this are dimmed and tagged "unsure" rather than
 # shown as confidently as a clean one. Above [stt].logprob_floor (-1.0), which
 # drops a line outright — this is the band that is worth reading but not
-# trusting. INERT under model="qwen3": it reports no avg_logprob.
+# trusting. Under qwen3, -0.6 dims about 7% of call lines.
 confidence_floor = -0.6
