@@ -43,7 +43,7 @@ class _FakeSession:
     def transcribe(self, audio, **kw):
         self.calls.append(kw)
         return types.SimpleNamespace(
-            text="  カフェテリアでパンを発見  ",
+            text="  図書館で辞書を借りた  ",
             language="ja",
             finish_reason="stop",
             truncated=False,
@@ -125,7 +125,7 @@ def test_the_sentinels_make_every_confidence_filter_abstain():
     # An ordinary line, and a short one that only the confidence branch could
     # have killed (no peak information is passed, so the amplitude gate cannot
     # fire and the decision rests entirely on the sentinels).
-    assert not is_hallucination("結構早いな", res, cfg)
+    assert not is_hallucination("今日は寒いね", res, cfg)
     assert not is_hallucination("はい", res, cfg)
 
     # And the floors really are the thing being cleared, not a coincidence of
@@ -181,7 +181,7 @@ def test_transcribe_returns_stripped_text_and_the_sentinels(engine):
     from tsutawaru.stt.qwen_mlx_engine import NO_LOGPROB, NO_SPEECH_PROB
 
     r = engine().transcribe(np.zeros(16000, dtype=np.float32))
-    assert r.text == "カフェテリアでパンを発見"
+    assert r.text == "図書館で辞書を借りた"
     assert r.language == "ja"
     assert r.avg_logprob == NO_LOGPROB
     assert r.no_speech_prob == NO_SPEECH_PROB
@@ -202,12 +202,12 @@ def test_the_model_is_loaded_once_not_per_utterance(engine):
 def test_initial_prompt_is_passed_as_qwens_biasing_context(engine):
     """Whisper's initial_prompt can be echoed into the transcript; this cannot.
 
-    Same config key, better mechanism — this is where the mangled proper nouns
-    (カベテリア, ディスコート) would be corrected if anywhere.
+    Same config key, better mechanism — this is where mangled proper nouns
+    would be corrected if anywhere.
     """
-    eng = engine(initial_prompt="Discord カフェテリア パン")
+    eng = engine(initial_prompt="Discord 図書館 辞書")
     eng.transcribe(np.zeros(16000, dtype=np.float32))
-    assert eng.made["session"].calls[0]["context"] == "Discord カフェテリア パン"
+    assert eng.made["session"].calls[0]["context"] == "Discord 図書館 辞書"
 
 
 def test_language_is_pinned_or_left_to_detection(engine):
