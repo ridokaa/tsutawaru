@@ -223,6 +223,31 @@ def _looped(text: str) -> bool:
     return len(set(parts)) / len(parts) < LOOP_MAX_UNIQUE
 
 
+# The model talking about the line instead of translating it — "I don't have
+# enough information to translate this line accurately. The Japanese text
+# provided (…) appears to be incomplete…" — on ASR garbage, then cut off by
+# MAX_TOKENS mid-sentence. A paragraph of fluent English is the worst thing to
+# show for a line nobody said, so it is declined and the card says
+# "(no translation)".
+#
+# Phrases only commentary uses, never "the phrase" or "translate this" alone:
+# both occur in real speech ("translate this manual urgently", a streamer on
+# "the phrase…"), and the first draft fired on them. Run over every translation
+# on disk (16,768: the call and BSD sets across all ten arms, every recorded
+# session and report), this fires on the shipped model's 3 live commentaries
+# (2026-09-30, 10-02, 10-14) and 42 from the rejected models, on 0 real ones.
+_COMMENTARY = re.compile(
+    r"\b(?:the|this) (?:japanese|provided|given|original|source|input) "
+    r"(?:text|phrase|line|sentence|word)\b"
+    r"|\b(?:text|phrase|input|sentence) you (?:provided|gave|wrote)\b"
+    r"|\bI can(?:'t|not) (?:translate th(?:is|e)|help with that)\b"
+    r"|\benough (?:information|context) to translate\b"
+    r"|\bI(?:'m| am) (?:unable|not able) to (?:translate|generate|help)\b"
+    r"|\bas an AI\b",
+    re.I,
+)
+
+
 def _undupe(text: str) -> str:
     """Keep the output up to the point the loop started, drop the rest.
 
@@ -502,6 +527,18 @@ class LocalTranslator(Translator):
         src = text[:-1] if text.endswith("。") else text
         with self.lock:
             out = self._generate(src, self.history)
+            if _COMMENTARY.search(out):
+                from tsutawaru.stt.filters import DROPS
+
+                DROPS["mt-commentary"] += 1
+                # Retried only when there was context to withhold: decoding is
+                # greedy, so the same prompt gives the same paragraph back.
+                retry = self._generate(src, ()) if self.history else ""
+                out = "" if _COMMENTARY.search(retry) else retry
+                log.warning("[translate] commentary instead of a translation "
+                            "for %r — %s", text[:40], repr(out[:60]) if out else
+                            "declined")
+                return out  # never remembered, like the echo below
             if _echoes_context(out, self.history):
                 from tsutawaru.stt.filters import DROPS
 
@@ -715,5 +752,28 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.local_ml
     # the first answer, rather than blanking the line.
     assert LocalTranslator.sentence(_Stub(answer=""), "終わった。") \
         == "Something I should not have said."
+
+    # Commentary: declined, and retried only when context could be withheld.
+    meta = ("I don't have enough information to translate this line. The "
+            "Japanese text provided appears to be incomplete.")
+    for real in ("Please translate this manual urgently.",
+                 "The term may be extended in some cases.",
+                 "That's why the phrase sounds odd to you."):
+        assert not _COMMENTARY.search(real), real
+
+    class _Meta(_Stub):
+        def _generate(self, src, history):
+            return meta if history or not self.answer else self.answer
+
+    stub = _Meta()
+    assert LocalTranslator.sentence(stub, "えっと。") == "It ended there."
+    assert list(stub.history) == hist, "commentary must not be remembered"
+    assert LocalTranslator.sentence(_Meta(answer=""), "えっと。") == ""
+    calls = []
+    stub = _Meta()
+    stub.history = []
+    stub._generate = lambda src, h: calls.append(h) or meta
+    assert LocalTranslator.sentence(stub, "えっと。") == ""
+    assert calls == [[]], "no context to withhold, so no second pass"
 
     print("local_mlx self-check OK")
