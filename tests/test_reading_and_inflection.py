@@ -142,15 +142,13 @@ def test_labels_reach_the_window():
     seg.tokens = [Token(surface="行けなかった", base_form="行ける", romaji="ikenakatta",
                         pos="動詞", pos1="自立", gloss="i can go",
                         infl=["negative", "past"])]
-    # The breakdown is collapsed by default, so the labels live behind the
-    # toggle. Both states matter: the header must not leak the gloss, and
-    # opening it must still carry the inflection labels through.
-    collapsed = _fmt_block(seg, UiCfg())
-    assert "negative, past" not in collapsed
-    assert "tok:" in collapsed  # the toggle is there to open
-
-    html = _fmt_block(seg, UiCfg(), expanded=True)
-    assert "negative, past" in html
+    assert "negative, past" in _fmt_block(seg, UiCfg())
+    # The grid shows the first sense only; a cell is as wide as its gloss.
+    seg.tokens[0].gloss = "can go / be able to go"
+    assert "can go<" in _fmt_block(seg, UiCfg())
+    assert "be able to go" not in _fmt_block(seg, UiCfg())
+    # Off means off: no grid, not an empty one.
+    assert "negative, past" not in _fmt_block(seg, UiCfg(show_breakdown=False))
 
 
 def test_labels_reach_the_console_and_log():

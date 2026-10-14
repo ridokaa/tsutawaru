@@ -108,7 +108,6 @@ def test_divider_prints_only_where_the_source_changes(qapp):
     """One label per boundary, not one per line — including the very first."""
     sink = WindowSink.__new__(WindowSink)  # no Qt, no queues: only the join logic
     sink.cfg = UiCfg()
-    sink._expanded = set()
     sink.segments, sink.order = {}, []
     for stream in ("YouTube (Chrome)", "YouTube (Chrome)", "Discord", "Discord"):
         seg = _seg(stream=stream)
@@ -265,7 +264,7 @@ def test_a_stranded_line_still_reaches_the_log_file(qapp, tmp_path):
     sink.cfg = UiCfg(log_file=str(log))
     sink.ws_sink = None
     sink.segments, sink.order = {}, []
-    sink._expanded, sink._backfilled, sink._logged = set(), set(), set()
+    sink._backfilled, sink._logged = set(), set()
     sink._dirty, sink._seen_total = False, 0
     sink._expect, sink._seen = {"breakdown", "english"}, {}
 

@@ -65,20 +65,18 @@ MAX_TEXT_PX = 660
 # The live lane: the newest segment, held still below the scrollback instead of
 # sliding up its bottom edge. Both bounds are widget heights, measured by laying
 # real cards out at the text cap and adding the lane's own chrome. Re-measured
-# after _LIVE_CSS enlarged the tiers: one JP line 168, two 217, +29 for a
-# collapsed breakdown header on either, 278 with it open.
+# after _LIVE_CSS enlarged the tiers: one JP line 168, two 217. With the word
+# grid under it: 275 for up to ~10 words, 407 at 14, 490 at the 24-word cap.
 #
-# The minimum is a one-line card, so every ordinary utterance renders at exactly
-# the floor and the lane holds still across the whole provisional -> final ->
-# next-line cycle; only a genuine second line of Japanese moves it. The maximum
-# clears the tallest card that is still just a card — two JP lines plus the
-# breakdown header, 246 — and leaves an opened breakdown to scroll inside the
-# lane rather than eat half the window.
+# The minimum is a one-line card, so with the breakdown off every ordinary
+# utterance renders at exactly the floor and the lane holds still across the
+# whole provisional -> final -> next-line cycle. There is no fixed maximum: the
+# lane grows to show its whole card, breakdown included, and stops only where
+# the scrollback above it would drop below LIST_MIN_PX — roughly one card, so
+# the line that just left the lane is still in view. Only a window too short
+# for both scrolls the card inside the lane.
 LIVE_MIN_PX = 172
-LIVE_MAX_PX = 250
-# href prefix for the per-word breakdown toggle. Not a real scheme: it never
-# leaves the widget, because setOpenLinks(False) routes every click to us.
-TOK_SCHEME = "tok:"
+LIST_MIN_PX = 160
 # Name prefix for the per-segment scroll anchor. A reader who has scrolled up is
 # holding a *line*, not a pixel offset, and the two stop meaning the same thing
 # as soon as the transcript is trimmed — see set_html().
@@ -167,14 +165,17 @@ body { background:#0f1115; color:#e8e8ea;
    falls back to a generic sans. Measured — it reported "Sans Serif". */
 .romaji { color:#9aa4b8; font-size:13px; font-style:italic; margin-bottom:6px; }
 .en     { color:#8fe3a0; font-size:15px; line-height:1.45; margin-bottom:8px; }
-.tokhdr { margin-top:2px; }
-.toktoggle { color:#7d8595; font-size:11.5px; text-decoration:none;
-             letter-spacing:.04em; }
-.tok    { color:#c8cddb; font-size:12.5px; line-height:1.7; margin-top:6px; }
-.tsurf  { color:#e8e8ea; }
+/* The breakdown, as a word grid: one small table per word, floated so Qt wraps
+   them across rows the way inline blocks would — QTextDocument has no
+   inline-block, and float is supported on tables. Every cell carries all four
+   rows, empty ones included, so each row of the grid comes out one height. */
+.tok    { color:#c8cddb; font-size:12.5px; margin-top:8px; }
+.word   { float:left; }
+.wcell  { padding:2px 14px 8px 0; }
+.tsurf  { color:#e8e8ea; font-size:16px; }
 .trom   { color:#7d8595; }
 .tgloss { color:#e0b978; }
-.tinfl  { color:#7f9bd0; font-size:11.5px; }
+.tinfl  { color:#7f9bd0; font-size:11px; }
 .waiting{ color:#5a6172; }
 /* A line the ASR scored below [ui].confidence_floor. Multi-class selectors work
    in QTextDocument's CSS subset — verified: `.jp.shaky` overrides the colour and
@@ -366,22 +367,45 @@ def _ab_columns(seg: Segment, cfg: UiCfg) -> str:
     )
 
 
-def _fmt_block(seg: Segment, cfg: UiCfg, expanded: bool = False,
-               joined_below: bool = False, continues_above: bool = False) -> str:
-    """Render one segment. `expanded` controls the per-word breakdown.
+def _word(t) -> str:
+    """One cell of the breakdown grid: surface, romaji, meaning, inflection."""
+    esc = html.escape
+    if t.gloss is None:
+        gloss = '<span class="waiting">…</span>'
+    elif t.gloss == "":
+        gloss = '<span class="waiting">?</span>'
+    else:
+        # First sense only. The glossaries join up to two senses with " / ",
+        # and a cell is as wide as its longest row: "nonexistent / not being
+        # (there)" made one word a third of the card and left gaps the width
+        # of a word between its neighbours. The console and the log keep both.
+        gloss = esc(t.gloss.split(" / ")[0])
+    # The gloss is the dictionary form's meaning; without the inflection the
+    # breakdown reads "i can go" for 行けなかった ("couldn't go").
+    return (
+        '<table class="word" cellspacing="0" cellpadding="0"><tr><td class="wcell">'
+        f'<div class="tsurf">{esc(t.surface)}</div>'
+        f'<div class="trom">{esc(t.romaji)}</div>'
+        f'<div class="tgloss">{gloss}</div>'
+        f'<div class="tinfl">{esc(", ".join(t.infl))}</div>'
+        "</td></tr></table>"
+    )
 
-    The breakdown is collapsed by default: on a long sentence it pushed the
-    English translation off the top of the view, so reading a line meant
-    scrolling back up for it. It is now behind a click, and the header states
-    the word count so there is a reason to open it.
+
+def _fmt_block(seg: Segment, cfg: UiCfg, joined_below: bool = False,
+               continues_above: bool = False) -> str:
+    """Render one segment, with its word grid whenever the breakdown is on.
+
+    The grid used to sit behind a per-line click, as a one-word-per-line list
+    that on a long sentence pushed the English off the top of the view. Laid
+    out across the card it is three to four times shorter, so it is simply
+    shown: the Breakdown switch is the one control.
 
     `joined_below` closes the card flush against the next one — see
     CARD_CLOSE_JOINED — and `continues_above` marks it as the back half of a cut
     turn. The caller owns both because they are facts about the *pair*, and a
     segment cannot see its neighbours.
     """
-    esc = html.escape
-    close = CARD_CLOSE_JOINED if joined_below else CARD_CLOSE
     out = [CARD_OPEN.format(rail="railwait" if seg.partial else "rail")]
     # Scroll anchor. Carries no href, so QTextBrowser does not treat it as a
     # hyperlink and the block's own CSS keeps winning — verified: the character
@@ -399,42 +423,14 @@ def _fmt_block(seg: Segment, cfg: UiCfg, expanded: bool = False,
                           dropped=seg.dropped, shaky=_untrusted(seg, cfg)))
 
     if cfg.show_breakdown and seg.tokens:
-        # QTextBrowser has no JavaScript and ignores <details>, so the toggle is
-        # an anchor the window intercepts via anchorClicked (setOpenLinks(False))
-        # and turns into a re-render with this id flipped in `expanded`.
-        n = len(seg.tokens) + (seg.truncated or 0)
-        caret = "▾" if expanded else "▸"
-        out.append(
-            f'<div class="tokhdr"><a class="toktoggle" href="{TOK_SCHEME}{seg.id}">'
-            f'{caret} {n} word{"" if n == 1 else "s"}</a></div>'
-        )
-        if not expanded:
-            out.append(close)
-            return "".join(out)
-
-        rows = []
-        for t in seg.tokens:
-            if t.gloss is None:
-                gloss = '<span class="waiting">…</span>'
-            elif t.gloss == "":
-                gloss = '<span class="waiting">?</span>'
-            else:
-                gloss = f'<span class="tgloss">{esc(t.gloss)}</span>'
-            rom = f'<span class="trom">({esc(t.romaji)})</span>' if t.romaji else ""
-            # The gloss is the dictionary form's meaning; without this the
-            # breakdown reads "i can go" for 行けなかった ("couldn't go").
-            infl = (
-                f' <span class="tinfl">[{esc(", ".join(t.infl))}]</span>'
-                if t.infl else ""
-            )
-            rows.append(
-                f'<span class="tsurf">{esc(t.surface)}</span> {rom} — {gloss}{infl}'
-            )
+        words = [_word(t) for t in seg.tokens]
         if seg.truncated:
-            rows.append(f'<span class="waiting">… (+{seg.truncated} more)</span>')
-        out.append('<div class="tok">' + "<br>".join(rows) + "</div>")
+            words.append('<table class="word"><tr><td class="wcell">'
+                         f'<span class="waiting">+{seg.truncated} more</span>'
+                         "</td></tr></table>")
+        out.append('<div class="tok">' + "".join(words) + "</div>")
 
-    out.append(close)
+    out.append(CARD_CLOSE_JOINED if joined_below else CARD_CLOSE)
     return "".join(out)
 
 
@@ -530,12 +526,11 @@ try:
 
     class TranscriptWindow(QtWidgets.QMainWindow):
         def __init__(self, cfg: UiCfg, on_close=None, sources=None, on_source=None,
-                     current_source: str = "", on_toggle=None, on_refresh=None,
+                     current_source: str = "", on_refresh=None,
                      on_clear=None):
             super().__init__()
             self.cfg = cfg
             self._on_close = on_close
-            self._on_toggle = on_toggle
             # Marks the transcript for rebuild on the next tick. A tier toggle
             # changes what every stored line renders as, and without this the
             # change would not show until the next line arrived — which during a
@@ -552,17 +547,12 @@ try:
             self._set_title(current_source)
             # Sized to the text cap plus chrome, so the window looks right on
             # launch rather than opening with 240px of dead margin. Taller than
-            # the old 620 because the live lane now takes up to LIVE_MAX_PX of it
-            # and the scrollback was left with under 300px.
+            # the old 620 because the live lane takes a card's full height and
+            # the scrollback was left with under 300px.
             self.resize(MAX_TEXT_PX + 40, 760)
             self.setMinimumSize(420, 280)
 
             self.view = _CappedView()
-            self.view.setOpenExternalLinks(False)
-            # Breakdown toggles are anchors; without this QTextBrowser tries to
-            # navigate to "tok:12" and blanks the transcript.
-            self.view.setOpenLinks(False)
-            self.view.anchorClicked.connect(self._on_anchor)
             self.view.document().setDefaultStyleSheet(_CSS)
             # Rich-text layout is incremental: after setHtml() the document keeps
             # growing across several event-loop turns, so scrollBar.maximum() is
@@ -577,6 +567,13 @@ try:
             self._holding = False
             self.view.document().documentLayout().documentSizeChanged.connect(
                 self._on_doc_resized
+            )
+            # The other way the bottom moves: the live lane growing or shrinking
+            # around a taller card resizes this viewport while the document stays
+            # the same size, so documentSizeChanged never fires. Measured with
+            # the word grid: pinned, yet left at 39 of 122 after one line.
+            self.view.verticalScrollBar().rangeChanged.connect(
+                lambda *_: self._on_doc_resized()
             )
             # Pinning has to answer to the reader, not only to the update loop.
             # Without this the mode only changed when a new segment arrived, so
@@ -598,9 +595,6 @@ try:
             # would mean re-deriving "the bottom" on every incremental layout
             # pass, which is the thing `_pin_bottom` exists to fight.
             self.live = _CappedView()
-            self.live.setOpenExternalLinks(False)
-            self.live.setOpenLinks(False)
-            self.live.anchorClicked.connect(self._on_anchor)
             self.live.document().setDefaultStyleSheet(_CSS + _LIVE_CSS)
             self.live.setStyleSheet(
                 "QTextBrowser{background:#12151d;border:none;"
@@ -621,7 +615,8 @@ try:
             col.setSpacing(0)
             col.addWidget(self.view, 1)
             col.addWidget(self.live, 0)
-            col.addWidget(self._mk_source_bar(current_source), 0)
+            self._bar = self._mk_source_bar(current_source)
+            col.addWidget(self._bar, 0)
             self.setCentralWidget(central)
 
             self.status = self.statusBar()
@@ -683,8 +678,8 @@ try:
             self.bd_button.setCheckable(True)
             self.bd_button.setChecked(self.cfg.show_breakdown)
             self.bd_button.setToolTip(
-                "Per-word breakdown. Off skips the per-word lookups entirely; "
-                "open a line later to fill them in."
+                "Per-word breakdown under every line. Off skips the per-word "
+                "lookups entirely; switching it back on fills them in."
             )
             self.bd_button.clicked.connect(self._set_breakdown)
             row.addWidget(self.bd_button)
@@ -780,32 +775,6 @@ try:
             self.setWindowFlags(flags | flag if checked else flags & ~flag)
             self.show()  # re-show: changing flags hides the window on macOS
 
-        def _on_anchor(self, url) -> None:
-            href = url.toString()
-            if not href.startswith(TOK_SCHEME):
-                return
-            # Qt selects the anchor's own text when a link is clicked — measured:
-            # one click on the toggle leaves "▸ 2 words" selected. `tick` reads
-            # any selection as the reader holding one and stops rebuilding, so
-            # the breakdown did not open until they clicked elsewhere to
-            # deselect: the toggle looked broken, with "paused — text selected"
-            # underneath it. A click on a control is a command, not a selection.
-            #
-            # Only the view that was clicked is cleared. Both of them route here,
-            # and a reader can be holding a real selection in one while toggling
-            # a line in the other.
-            view = self.sender()
-            if isinstance(view, QtWidgets.QTextBrowser):
-                cur = view.textCursor()
-                cur.clearSelection()
-                view.setTextCursor(cur)
-            if self._on_toggle is None:
-                return
-            try:
-                self._on_toggle(int(href[len(TOK_SCHEME):]))
-            except ValueError:  # pragma: no cover - defensive
-                pass
-
         def _clear(self) -> None:
             """Drop the transcript for real, including the live lane."""
             self.view.clear()
@@ -846,18 +815,27 @@ try:
             Guarded on a real change: setFixedHeight relays out the document,
             which re-emits documentSizeChanged straight back here.
 
-            Deliberately not pinned to the bottom. The only thing that outgrows
-            the clamp is an opened breakdown, and its top — the Japanese being
-            read — is the part worth keeping in view.
+            Deliberately not pinned to the bottom. What outgrows the clamp in a
+            short window is the breakdown, and the card's top — the Japanese
+            being read — is the part worth keeping in view.
             """
             # Chrome is measured, not assumed: Qt folds the stylesheet padding
             # into frameWidth, so a hardcoded constant was one pixel short and
             # the lane carried a permanent scrollbar over content that fit.
             chrome = max(0, self.live.height() - self.live.viewport().height())
             want = round(self.live.document().size().height()) + chrome
-            want = max(LIVE_MIN_PX, min(LIVE_MAX_PX, want))
+            # Measured off the central widget, not the two panes: their heights
+            # are mid-redistribution right after the lane is shown or resized.
+            room = self.centralWidget().height() - self._bar.height() - LIST_MIN_PX
+            want = max(LIVE_MIN_PX, min(room, want))
             if want != self.live.height():
                 self.live.setFixedHeight(want)
+
+        def resizeEvent(self, e) -> None:
+            super().resizeEvent(e)
+            # A shorter window lowers the lane's ceiling; nothing else refits it.
+            if self.live.isVisible():
+                self._fit_live()
 
         def at_bottom(self) -> bool:
             sb = self.view.verticalScrollBar()
@@ -1050,12 +1028,9 @@ class WindowSink:
         self.on_glosses = on_glosses
         self.segments: dict[int, Segment] = {}
         self.order: list[int] = []
-        # Segment ids whose per-word breakdown the reader has opened. Collapsed
-        # is the default, so this starts empty and only grows on a click.
-        self._expanded: set[int] = set()
-        # Segment ids already sent for a late gloss fetch. Without this, opening
-        # and closing a line while its lookup is still in flight would queue the
-        # same round-trip again.
+        # Segment ids already sent for a late gloss fetch. Without this, flipping
+        # the breakdown off and on while a lookup is still in flight would queue
+        # the same round-trip again.
         self._backfilled: set[int] = set()
         self._dirty = False
         self._seen_total = 0
@@ -1078,13 +1053,10 @@ class WindowSink:
         app.setApplicationName(WINDOW_TITLE)
         app.setApplicationDisplayName(WINDOW_TITLE)
 
-        def _refresh() -> None:
-            self._dirty = True
-
         win = TranscriptWindow(
             self.cfg, on_close=stop_evt.set, sources=self.sources,
             on_source=self.on_source, current_source=self.current_source,
-            on_toggle=self.toggle, on_refresh=_refresh, on_clear=self.clear,
+            on_refresh=self.refresh, on_clear=self.clear,
         )
         win.set_html(_empty_state(self.device_name, self.current_source), True)
         win.show()
@@ -1119,17 +1091,18 @@ class WindowSink:
         """
         self.segments.clear()
         self.order.clear()
-        self._expanded.clear()
         self._backfilled.clear()
         self._dirty = True
 
-    def toggle(self, seg_id: int) -> None:
-        """Open or close one line's per-word breakdown. Wired to the card's
-        toggle anchor in both views."""
-        self._expanded.symmetric_difference_update({seg_id})
-        if seg_id in self._expanded:
-            self._backfill(seg_id)
-        self._dirty = True  # picked up by the next tick
+    def refresh(self) -> None:
+        """A tier was switched. Every held line re-renders on the next tick."""
+        self._dirty = True
+        if self.cfg.show_breakdown:
+            # Lines that came through with it off have no meanings yet. Newest
+            # first, so the live lane and the bottom of the list fill in before
+            # lines scrolled out of sight.
+            for i in reversed(self.order):
+                self._backfill(i)
 
     def tick(self, win) -> None:
         """One poll: drain the queue, repaint if anything changed.
@@ -1208,8 +1181,8 @@ class WindowSink:
             pos and self.segments[self.order[pos - 1]].continued
             and _same_turn(pos - 1)
         )
-        return _fmt_block(seg, self.cfg, i in self._expanded,
-                          joined_below=joined, continues_above=follows)
+        return _fmt_block(seg, self.cfg, joined_below=joined,
+                          continues_above=follows)
 
     def _live_html(self) -> str:
         """The newest segment, for the fixed lane. Empty when there is none."""
@@ -1237,7 +1210,6 @@ class WindowSink:
                 while len(self.order) > self.cfg.max_lines:
                     dropped = self.order.pop(0)
                     self.segments.pop(dropped, None)
-                    self._expanded.discard(dropped)
                     self._backfilled.discard(dropped)
             self.segments[seg.id] = seg
             self._dirty = True
@@ -1255,6 +1227,7 @@ class WindowSink:
 
     def _backfill(self, seg_id: int) -> None:
         """Fetch the meanings for a line that came through with the tier off.
+        Called for every held line when the tier is switched back on.
 
         Only the gloss is deferred: the tokenizer runs regardless, so the line
         already has its surfaces, romaji and inflections and only the English

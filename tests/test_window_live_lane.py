@@ -24,8 +24,8 @@ from tsutawaru.config import UiCfg  # noqa: E402
 from tsutawaru.models import Segment, Token  # noqa: E402
 from tsutawaru.pipeline.queues import ui_q  # noqa: E402
 from tsutawaru.ui.window_qt import (  # noqa: E402
-    LIVE_MAX_PX, LIVE_MIN_PX, TOK_SCHEME, TranscriptWindow, WindowSink,
-    _fmt_block, _untrusted,
+    LIST_MIN_PX, LIVE_MIN_PX, TranscriptWindow, WindowSink, _fmt_block,
+    _untrusted,
 )
 
 JP = "昨日の夜に友達と映画を見に行ったんだけど、思っていたよりずっと面白かった"
@@ -43,7 +43,7 @@ def sink(qapp):
     while not ui_q.empty():          # other tests share the module-level queue
         ui_q.get_nowait()
     s = WindowSink(UiCfg(), device_name="Test Device")
-    win = TranscriptWindow(s.cfg, on_clear=s.clear, on_toggle=s.toggle)
+    win = TranscriptWindow(s.cfg, on_clear=s.clear, on_refresh=s.refresh)
     win.resize(700, 760)
     win.show()
     qapp.processEvents()
@@ -104,53 +104,55 @@ def test_no_selection_still_repaints(sink):
     assert not s._dirty
 
 
-def _click_toggle(view, qapp) -> bool:
-    """Click the card's breakdown toggle the way a reader does.
-
-    Synthetic, but through the real event path: the bug is in what Qt does to
-    the selection on a link click, which no direct call to the handler shows.
-    """
-    from PyQt6 import QtCore
-    from PyQt6.QtTest import QTest
-
-    lay = view.document().documentLayout()
-    off = view.verticalScrollBar().value()
-    for y in range(0, view.viewport().height(), 2):
-        for x in range(10, 400, 4):
-            if lay.anchorAt(QtCore.QPointF(x, y + off)).startswith(TOK_SCHEME):
-                QTest.mouseClick(view.viewport(),
-                                 QtCore.Qt.MouseButton.LeftButton,
-                                 QtCore.Qt.KeyboardModifier.NoModifier,
-                                 QtCore.QPoint(x, y))
-                qapp.processEvents()
-                return True
-    return False
+WORDS = [Token(surface=s, base_form=s, romaji=r, gloss=g)
+         for s, r, g in (("水", "mizu", "water"), ("を", "o", "(object)"),
+                         ("飲む", "nomu", "to drink"), ("雨", "ame", "rain"))]
 
 
-@pytest.mark.parametrize("pane", ["view", "live"])
-def test_opening_a_breakdown_is_not_a_selection(sink, pane):
-    """Qt selects a link's own text when it is clicked — one click on the toggle
-    left "▸ 2 words" selected. The freeze read that as the reader holding a
-    selection and stopped rebuilding, so the breakdown stayed shut, with
-    "paused — text selected" under it, until they clicked somewhere else."""
+def test_the_breakdown_shows_without_a_click_and_the_lane_fits_it(sink):
+    """It used to sit behind a per-line toggle, and opened in the live lane it
+    scrolled inside a 250px clamp. Now the switch is the one control, and the
+    lane takes the whole card as long as the list keeps about one card."""
     s, win, app = sink
-    toks = [Token(surface="水", base_form="水", romaji="mizu", gloss="water"),
-            Token(surface="飲む", base_form="飲む", romaji="nomu", gloss="to drink")]
-    for jp in ("水を飲む。", "そうだね。"):
+    for jp in ("水を飲む。", "雨が降る。", "水を飲む。", JP):
         ui_q.put(("new", Segment.new(stream="main", original=jp, romaji="r",
                                      english="e", partial=False,
-                                     tokens=list(toks))))
+                                     tokens=WORDS * 6)))   # the 24-token cap
     s.tick(win)
     app.processEvents()
 
-    view = getattr(win, pane)
-    assert _click_toggle(view, app), f"no toggle anchor found in {pane}"
+    assert "to drink" in win.view.toPlainText()
+    assert "to drink" in win.live.toPlainText()
+    assert win.live.verticalScrollBar().maximum() == 0, "card clipped in the lane"
+    assert win.view.height() >= LIST_MIN_PX
+    # The lane grew under a list following the tail: its viewport shrank with
+    # no change to its document, and the pin used to be left short.
+    sb = win.view.verticalScrollBar()
+    assert sb.maximum() > 0 and sb.value() == sb.maximum()
+
+
+def test_switching_the_breakdown_on_fills_lines_captured_with_it_off(sink):
+    s, win, app = sink
+    s.cfg.show_breakdown = False
+    asked = []
+    s.on_glosses = asked.append
+    blank = [Token(surface="水", base_form="水", romaji="mizu")]   # gloss None
+    segs = [Segment.new(stream="main", original="水", partial=False,
+                        tokens=list(blank)) for _ in range(3)]
+    for seg in segs:
+        ui_q.put(("new", seg))
     s.tick(win)
     app.processEvents()
+    assert "mizu" not in win.view.toPlainText() + win.live.toPlainText()
 
-    assert not win.has_selection()
-    assert "paused" not in win.status.currentMessage()
-    assert "water" in view.toPlainText(), "breakdown did not open on the first click"
+    s.cfg.show_breakdown = True
+    s.refresh()
+    assert asked == segs[::-1], "newest first, each line once"
+    s.refresh()
+    assert len(asked) == 3, "an in-flight lookup is not queued again"
+    s.tick(win)
+    app.processEvents()
+    assert "mizu" in win.live.toPlainText()
 
 
 def test_clear_does_not_come_back(sink):
@@ -193,14 +195,14 @@ def test_live_lane_holds_the_newest_and_history_does_not(sink):
 
 
 def test_live_lane_height_is_stable_and_clamped(sink):
-    """It must not resize under the reader on an ordinary line, and an opened
-    breakdown must not be allowed to eat the window."""
+    """It must not resize under the reader on an ordinary line, and an
+    outsized card must not be allowed to eat the window."""
     s, win, app = sink
     short, = _push(1)
     s.tick(win)
     app.processEvents()
     first = win.live.height()
-    assert LIVE_MIN_PX <= first <= LIVE_MAX_PX
+    assert LIVE_MIN_PX <= first
 
     ui_q.put(("english", short))   # same line, filled in further
     s.tick(win)
@@ -212,7 +214,7 @@ def test_live_lane_height_is_stable_and_clamped(sink):
     ui_q.put(("new", huge))
     s.tick(win)
     app.processEvents()
-    assert win.live.height() == LIVE_MAX_PX
+    assert win.view.height() >= LIST_MIN_PX
     # Clamped, so the overflow has to remain reachable.
     assert win.live.verticalScrollBar().maximum() > 0
 
@@ -253,7 +255,7 @@ def test_untrusted_line_renders_dimmed_and_tagged(qapp):
     def colour_of(text: str, html: str) -> str:
         doc = QtGui.QTextDocument()
         doc.setDefaultStyleSheet(_CSS)
-        doc.setTextWidth(640)
+        doc.setTextWidth(420)
         doc.setHtml(f"<body>{html}</body>")
         block = doc.begin()
         while block.isValid():
@@ -275,7 +277,7 @@ def test_untrusted_line_renders_dimmed_and_tagged(qapp):
     # Still the 19px JP face — the override must not cost the tier its typography.
     doc = QtGui.QTextDocument()
     doc.setDefaultStyleSheet(_CSS)
-    doc.setTextWidth(640)
+    doc.setTextWidth(420)
     doc.setHtml(f"<body>{shaky}</body>")
     block = doc.begin()
     while block.isValid():
@@ -351,7 +353,7 @@ def test_live_card_sets_its_type_larger_without_losing_the_faces(sink):
     def tiers(sheet):
         doc = QtGui.QTextDocument()
         doc.setDefaultStyleSheet(sheet)
-        doc.setTextWidth(640)
+        doc.setTextWidth(420)
         doc.setHtml(f"<body>{card}</body>")
         out, block = {}, doc.begin()
         while block.isValid():
