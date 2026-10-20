@@ -414,3 +414,103 @@ def test_the_rail_says_which_pane_as_well_as_which_state(sink):
     pending = _rail_colour(win.live)
     assert RAIL_PENDING in pending
     assert RAIL_LIVE not in pending and RAIL_FINAL not in pending
+
+
+# --- 4. redraw only what changed ------------------------------------------
+
+def test_the_newest_line_filling_in_leaves_the_history_alone(sink, monkeypatch):
+    """Every event used to rebuild the whole history: with the word grid and
+    200 lines held, 367 ms of CPU each, about four times per line. Only a line
+    moving into the history touches it now, and only by an append."""
+    s, win, app = sink
+    _push(3)
+    s.tick(win)
+    calls = []
+    monkeypatch.setattr(win, "set_html", lambda *a: calls.append("rebuild"))
+    monkeypatch.setattr(win, "append_html", lambda *a: calls.append("append"))
+    seg = Segment.new(stream="main", original="水を飲む。", partial=True)
+    ui_q.put(("new", seg))
+    s.tick(win)
+    assert calls == ["append"]
+    for kind in ("romaji", "breakdown", "english"):
+        ui_q.put((kind, seg))
+        s.tick(win)
+    assert calls == ["append"], "the newest line is in the live lane only"
+    old = s.segments[s.order[0]]
+    ui_q.put(("english", old))             # a late update to an older line
+    s.tick(win)
+    assert calls == ["append", "rebuild"]
+
+
+def test_an_appended_history_renders_as_a_rebuilt_one(sink):
+    """insertHtml is not setHtml: without the <body> wrapper each card's
+    spacers took the default font's metrics and the history drifted 2px a
+    card, and a divider merged into the previous card's last paragraph."""
+    s, win, app = sink
+    for i in range(10):
+        ui_q.put(("new", Segment.new(
+            stream="other" if i in (2, 3) else "main", original=f"水を飲む{i}",
+            romaji="mizu", english=f"line {i}", partial=False,
+            continued=(i == 6), tokens=list(WORDS))))
+        s.tick(win)
+        app.processEvents()
+    sb = win.view.verticalScrollBar()
+    shots = []
+    for v in (0, sb.maximum()):
+        sb.setValue(v)
+        app.processEvents()
+        shots.append(win.view.grab().toImage())
+    s._dirty = s._hist_dirty = True
+    s.tick(win)
+    app.processEvents()
+    for v, shot in zip((0, sb.maximum()), shots):
+        sb.setValue(v)
+        app.processEvents()
+        assert win.view.grab().toImage() == shot
+
+
+def test_a_height_only_resize_does_not_relayout_the_history(sink):
+    """setTextWidth re-lays out the whole document even at the same width, and
+    the history is resized whenever the live lane changes height."""
+    from PyQt6 import QtGui
+
+    s, win, app = sink
+    widths = []
+
+    class _Doc(QtGui.QTextDocument):
+        def setTextWidth(self, w):
+            widths.append(w)
+            super().setTextWidth(w)
+
+    doc = _Doc(win.view)
+    doc.setDefaultStyleSheet(win.view.document().defaultStyleSheet())
+    win.view.setDocument(doc)
+    app.processEvents()
+    widths.clear()
+    win.resize(win.width(), win.height() - 120)
+    app.processEvents()
+    assert widths == []
+
+
+def test_appending_holds_a_reader_who_scrolled_up_and_follows_one_who_did_not(sink):
+    s, win, app = sink
+    _push(12)
+    s.tick(win)
+    app.processEvents()
+    sb = win.view.verticalScrollBar()
+    assert sb.value() == sb.maximum() > 0, "following the tail"
+
+    _push(1)
+    s.tick(win)
+    app.processEvents()
+    assert sb.value() == sb.maximum(), "an append keeps a following reader at the end"
+
+    sb.setValue(sb.maximum() // 3)
+    app.processEvents()
+    held = win._anchor_at_top()
+    _push(3)
+    for _ in range(3):
+        s.tick(win)
+        app.processEvents()
+    assert win._anchor_at_top() == held
+    assert sb.value() < sb.maximum()

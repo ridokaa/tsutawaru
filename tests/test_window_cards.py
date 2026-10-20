@@ -265,7 +265,7 @@ def test_a_stranded_line_still_reaches_the_log_file(qapp, tmp_path):
     sink.ws_sink = None
     sink.segments, sink.order = {}, []
     sink._backfilled, sink._logged = set(), set()
-    sink._dirty, sink._seen_total = False, 0
+    sink._dirty, sink._hist_dirty, sink._seen_total = False, False, 0
     sink._expect, sink._seen = {"breakdown", "english"}, {}
 
     seg = Segment.new(stream="t", original="ねこ", romaji="neko", dropped=True,

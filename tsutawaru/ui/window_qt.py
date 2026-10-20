@@ -43,6 +43,13 @@ BANNER = r"""+---------------------+
 |  t s u t a w a r u  |
 +---------------------+"""
 POLL_MS = 100          # how often the Qt thread drains ui_q
+# How far past [ui].max_lines the history may run before it is cut back. A line
+# moving into the history is appended rather than the whole history rebuilt,
+# and trimming the oldest line breaks that — it changes the first card, so it
+# needs a full rebuild. Trimming one line per new line, as it used to, made
+# every line a full rebuild once the cap was reached; cutting back 50 at a
+# time makes it one in 50.
+TRIM_SLACK = 50
 STICKY_BOTTOM_PX = 40  # treat "within 40px of the end" as pinned to the bottom
 # How wide the text column is allowed to get, whatever the window does. Measured
 # by reading Qt's wrap points back out of a laid-out segment: the uncapped window
@@ -522,7 +529,13 @@ try:
             # — so a vertical scrollbar appearing or disappearing left the
             # document 16px wider than the viewport and raised a *horizontal*
             # scrollbar across a transcript that wraps and never needed one.
-            self.document().setTextWidth(self.viewport().width())
+            #
+            # Only on a real change: setTextWidth re-lays out the whole document
+            # even when the width is the same. The history is resized every
+            # time the live lane changes height, which with the word grid is
+            # most lines, and each of those re-laid out every card it held.
+            if self.document().textWidth() != self.viewport().width():
+                self.document().setTextWidth(self.viewport().width())
 
     class TranscriptWindow(QtWidgets.QMainWindow):
         def __init__(self, cfg: UiCfg, on_close=None, sources=None, on_source=None,
@@ -1000,6 +1013,33 @@ try:
             elif not (self._anchor_hold[0] and self._hold_anchor()):
                 self._set_scroll(min(prev, sb.maximum()))
 
+        def append_html(self, body: str) -> None:
+            """Add cards to the end of the history without rebuilding it.
+
+            Holds the reader's place the way set_html() does, minus the
+            rebuild: appending below the view moves nothing above it, so a
+            reader following the tail is re-pinned and one scrolled up only
+            needs their anchor refreshed — `_on_doc_resized` re-asserts the
+            stored one, and the reader may have scrolled since it was taken.
+            """
+            keep = self.at_bottom()
+            self._anchor_hold = ("", 0) if keep else self._anchor_at_top()
+            self._pin_bottom = keep
+            cur = QtGui.QTextCursor(self.view.document())
+            cur.movePosition(QtGui.QTextCursor.MoveOperation.End)
+            was_programmatic = self._programmatic_scroll
+            self._programmatic_scroll = True
+            try:
+                # Wrapped like set_html's: the sheet's `body` rule carries the
+                # font family, and without it the &nbsp; spacers in each card
+                # took the default font's metrics — 2px short apiece, measured,
+                # so an appended history drifted from a rebuilt one.
+                cur.insertHtml(f"<body>{body}</body>")
+            finally:
+                self._programmatic_scroll = was_programmatic
+            if keep:
+                self._set_scroll(self.view.verticalScrollBar().maximum())
+
         def closeEvent(self, event):
             if self._on_close is not None:
                 self._on_close()
@@ -1033,6 +1073,17 @@ class WindowSink:
         # the same round-trip again.
         self._backfilled: set[int] = set()
         self._dirty = False
+        # The history needs a full rebuild: a line already in it changed, or a
+        # tier was switched. Separate from `_dirty`, which the live lane answers
+        # to — most events are the newest line filling in (romaji, breakdown,
+        # English), and that line is not in the history. A line moving *into*
+        # the history is appended instead, see `_hist_ids`. With the word grid
+        # and 200 lines held, one rebuild measured 367 ms of CPU, and it used to
+        # run on every event, about four per line.
+        self._hist_dirty = False
+        # Segment ids the history pane is currently showing, in order. When the
+        # new history only extends this, the extra cards are appended.
+        self._hist_ids: list[int] = []
         self._seen_total = 0
         # --log-file support. A segment is written once, when every lane that
         # will report has reported — same completion rule as the console sink,
@@ -1092,11 +1143,11 @@ class WindowSink:
         self.segments.clear()
         self.order.clear()
         self._backfilled.clear()
-        self._dirty = True
+        self._dirty = self._hist_dirty = True
 
     def refresh(self) -> None:
         """A tier was switched. Every held line re-renders on the next tick."""
-        self._dirty = True
+        self._dirty = self._hist_dirty = True
         if self.cfg.show_breakdown:
             # Lines that came through with it off have no meanings yet. Newest
             # first, so the live lane and the bottom of the list fill in before
@@ -1117,8 +1168,21 @@ class WindowSink:
         frozen = win.has_selection()
         if self._dirty and not frozen:
             self._dirty = False
-            keep = win.at_bottom()
-            win.set_html(self._transcript_html(), keep)
+            shown = self.order[:-1]
+            n = len(self._hist_ids)
+            # A source switch inside the new lines needs a divider, which is a
+            # <div>, and insertHtml merges a leading paragraph into the last
+            # one already there — measured, the divider lost its top margin.
+            # Switches are rare, so those take the rebuild instead, and an
+            # append always starts with a card table, which inserts cleanly.
+            switched = len({self.segments[i].stream for i in shown[n - 1:]}) > 1
+            if (self._hist_dirty or not n or switched
+                    or shown[:n] != self._hist_ids):
+                win.set_html(self._transcript_html(), win.at_bottom())
+            elif len(shown) > n:
+                win.append_html(self._cards(n, len(shown)))
+            self._hist_dirty = False
+            self._hist_ids = shown
             win.set_live(self._live_html())
         # Say so, or a frozen transcript reads as a hung one.
         win.status.showMessage(
@@ -1140,12 +1204,18 @@ class WindowSink:
         """
         if not self.order:
             return _empty_state(self.device_name, self.current_source)
-        out, last = [], None
-        # The last line is excluded: it lives in the live lane. Positions rather
-        # than ids, because a card has to know its neighbours and looking those
-        # up by id would scan `order` once per line on every repaint.
-        first = max(0, len(self.order) - self.cfg.max_lines)
-        for pos in range(first, len(self.order) - 1):
+        # The last line is excluded: it lives in the live lane.
+        return self._cards(0, len(self.order) - 1)
+
+    def _cards(self, start: int, end: int) -> str:
+        """Cards for positions start..end-1 of `order`, with their dividers.
+
+        Positions rather than ids, because a card has to know its neighbours
+        and looking those up by id would scan `order` once per line.
+        """
+        out = []
+        last = self.segments[self.order[start - 1]].stream if start else None
+        for pos in range(start, end):
             seg = self.segments[self.order[pos]]
             if seg.stream != last:
                 out.append(_divider(seg.stream))
@@ -1207,10 +1277,13 @@ class WindowSink:
             if seg.id not in self.segments:
                 self.order.append(seg.id)
                 self._seen_total += 1
-                while len(self.order) > self.cfg.max_lines:
-                    dropped = self.order.pop(0)
-                    self.segments.pop(dropped, None)
-                    self._backfilled.discard(dropped)
+                if len(self.order) > self.cfg.max_lines + TRIM_SLACK:
+                    while len(self.order) > self.cfg.max_lines:
+                        dropped = self.order.pop(0)
+                        self.segments.pop(dropped, None)
+                        self._backfilled.discard(dropped)
+            elif seg.id != self.order[-1]:
+                self._hist_dirty = True  # a late update to an older line
             self.segments[seg.id] = seg
             self._dirty = True
 
