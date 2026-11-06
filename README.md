@@ -32,13 +32,13 @@ Built to follow Japanese friends in Discord voice calls in real time, and to lea
 
 - **Speech recognition:** p50 205 ms per utterance. On the 11 hardest lines, graded by ear, the Japanese was right on 10. The 11th was unintelligible to a human listener too.
 - **Translation:** 588 of 588 lines translated offline, p50 425 ms / p95 849 ms, about 0.4% objectively broken (Japanese left in, loops, empty output).
+- **End to end:** p50 754 ms / p95 1877 ms from the voice detector closing a line to its English being ready, queue waits included, replayed in real time with nothing dropped. The detector waits about 450 ms after speech stops before it closes the line, so add that to get the delay behind the speaker.
 
 **Known weaknesses**, in the order they are being worked on:
 
 1. **Short fragments.** Japanese often leaves out who is speaking. On a fragment, the translator completes a full English sentence and fills in a subject, usually "I", that the speaker never said. On those same 11 hard lines the English was wrong on 8 (a sample picked because it looked suspicious, so not an error rate).
 2. **A weak doubt signal.** Lines the speech recognition was unsure of are dimmed and tagged "unsure" (about 7% of call lines), and the least certain 1% are dropped. Checked against a second recogniser and the graded lines, not yet by watching it live.
-3. **No end-to-end latency figure.** The numbers above are per stage; time spent waiting in queues is not measured yet.
-4. **Very loud game audio.** On the loudest stream tested, the voice detector misses about 19% of speech starts.
+3. **Very loud game audio.** On the loudest stream tested, the voice detector misses about 19% of speech starts.
 
 ## Quick Start
 

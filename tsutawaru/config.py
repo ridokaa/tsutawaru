@@ -210,8 +210,6 @@ class TranslateCfg:
     # [stt].initial_prompt, which gets the ASR to spell the name the same way.
     names: dict[str, str] = field(default_factory=dict)
     gloss_workers: int = 3  # sentence translation gets its own dedicated worker
-    sentence_timeout_s: float = 4.0
-    token_timeout_s: float = 3.0
     lru_size: int = 20000
     persist_cache: bool = True
 
