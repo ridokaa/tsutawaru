@@ -159,8 +159,14 @@ measurements. Both models were run through the same code on the same lines:
 The gap on the call lines is 7.6 chrF, with a 95% interval of 5.1 to 10.2. The
 call key is a draft: it was written from the transcript, not by ear, and covers
 one call. On the 28 lines that were graded by ear it agrees with the listener
-(lines judged wrong average 31.4 against it, lines judged fine 57.1). PLaMo has
-not yet been watched through a live session.
+(lines judged wrong average 31.4 against it, lines judged fine 57.1).
+
+Live is slower than those offline figures. In its first live stream session
+(264 lines, 2026-11-17) a translation took p50 504 ms / p95 1467 ms, because
+the translator shares the GPU with speech recognition and is given context on
+a stream. Speech to English was p50 919 ms / p95 2928 ms, about the same as
+the sessions before the change. No line was left untranslated and none of the
+translator's guards fired.
 
 PLaMo takes no instructions, so names go in through its glossary, and tsutawaru
 puts back the "？" the speech recognition drops before translating. That is also
