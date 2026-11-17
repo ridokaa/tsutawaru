@@ -792,7 +792,7 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.local_ml
                      ("これ高くない。", "これ高くない？"),        # tag ending
                      ("前に言ったっけ", "前に言ったっけ？"),
                      ("そうか。", "そうか"),                     # realisation, not a question
-                     ("どうしようかな。", "どうしようかな"),      # musing
+                     ("明日は何を作ろうかな。", "明日は何を作ろうかな"),      # musing
                      ("昨日行ってきた。", "昨日行ってきた"),      # plain statement
                      ("雨が降るかもしれない。", "雨が降るかもしれない"),  # ない that is no question
                      ("時間がない", "時間がない"), ("早く寝なきゃいけない", "早く寝なきゃいけない"),
