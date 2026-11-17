@@ -75,7 +75,7 @@ def _selfcheck():
     clean = [
         ("はい", "Yes."),
         ("そうだな", "That's right."),
-        ("それは定期的にやる", "That's done periodically."),
+        ("それは毎週木曜にやる", "That's done every Thursday."),
         ("駅前の店は今日休みらしい", "The shop by the station seems to be closed today."),
     ]
     for jp, en in clean:
