@@ -32,26 +32,31 @@ TAIL = TAIL_WINDOWS * WIN
 
 
 # Speech buried in loud background does not make Silero say "silence" — it makes
-# it say "maybe". Measured over 20 minutes of each corpus clip, the fraction of
+# it say "maybe". Measured through this gate over 20 minutes of each corpus clip
+# (misses against YouTube auto captions, noisy threshold off), the fraction of
 # windows landing in this band is the one statistic that separates the clip the
 # gate fails on from the three it handles:
 #
-#   clip                  windows 0.1-0.5   miss @0.55   rms floor
-#   quiet solo stream           5.7%            0.5%       0.0003
-#   loud game stream           26.6%           29.0%       0.0040   <- the failure
-#   multi-speaker collab        6.7%            0.3%       0.0005
-#   large collab                7.6%            0.6%       0.0028
+#   clip                  windows 0.1-0.5   peak minute   miss @0.55   rms floor
+#   quiet solo stream           7.3%           13.1%          0.0%       0.0003
+#   loud game stream           15.2%           34.7%         31.0%       0.0040   <- the failure
+#   multi-speaker collab        8.5%           14.8%          3.6%       0.0005
+#   large collab                8.1%           13.5%          3.6%       0.0028
 #
-# Four times the nearest other clip, against a 50x spread in miss rate. The
-# noise floor also separates but less cleanly (D sits close to B), so the
-# ambiguity rate is what drives the switch.
+# About twice the nearest other clip, against nine times the misses. The peak
+# minute is what the switch reads, and the clean clips stop just short of
+# AMBIG_ON, so that margin is thin. The noise floor also separates but less
+# cleanly (D sits close to B), so the ambiguity rate is what drives the switch.
 #
-# On B the threshold sweep gives 29.0% -> 18.5% miss for 24.4% -> 37.7% false
-# positive at 0.30. That trade is only worth making where the misses are, which
-# is what this detects rather than assumes.
+# Measure through _window: _flush resets the RNN, and scoring the same windows
+# without those resets reads 5.7 / 26.6 / 6.7 / 7.6% and has every clip switch.
+#
+# On B the switch cuts misses 31.0% -> 19.8%. An earlier sweep at a fixed 0.30
+# put the false positives at 24.4% -> 37.7%. That trade is only worth making
+# where the misses are, which is what this detects rather than assumes.
 AMBIG_LO, AMBIG_HI = 0.1, 0.5
 AMBIG_WINDOWS = 1875          # 60 s of 32 ms windows
-AMBIG_ON, AMBIG_OFF = 0.15, 0.10   # hysteresis: measured clips sit at .057-.266
+AMBIG_ON, AMBIG_OFF = 0.15, 0.10   # hysteresis: peak minute .131-.148 clean, .347 loud
 
 
 class SileroVADGate:

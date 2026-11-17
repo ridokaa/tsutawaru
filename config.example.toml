@@ -27,18 +27,19 @@ threshold          = 0.55       # silero speech probability
 # Used instead of `threshold` while the gate judges the background noisy. Loud
 # game audio does not make Silero say "silence" behind a voice — it makes it say
 # "maybe", and 0.55 then discards the maybes. Measured over 20 minutes of each
-# corpus clip, the fraction of windows scoring 0.1-0.5 is what separates them:
+# corpus clip, the fraction of windows scoring 0.1-0.5 is what separates them
+# (misses against YouTube auto captions):
 #
-#   clip                windows 0.1-0.5   speech missed @0.55
-#   quiet solo stream         5.7%               0.5%
-#   loud game stream         26.6%              29.0%
-#   multi-speaker collab      6.7%               0.3%
-#   large collab              7.6%               0.6%
+#   clip                windows 0.1-0.5   peak minute   speech missed @0.55
+#   quiet solo stream         7.3%           13.1%              0.0%
+#   loud game stream         15.2%           34.7%             31.0%
+#   multi-speaker collab      8.5%           14.8%              3.6%
+#   large collab              8.1%           13.5%              3.6%
 #
 # Above 15% of windows ambiguous the gate switches to this value and logs it;
-# below 10% it switches back. On the loud clip 0.30 cuts misses 29.0% -> 18.5%
-# and costs false positives 24.4% -> 37.7%. Set this equal to `threshold` to
-# turn the behaviour off entirely.
+# below 10% it switches back. On the loud clip this cuts misses 31.0% -> 19.8%;
+# an earlier sweep at a fixed 0.30 put the false positives at 24.4% -> 37.7%. Set
+# this equal to `threshold` to turn the behaviour off entirely.
 threshold_noisy    = 0.30
 aggressiveness     = 2          # webrtc 0..3
 preroll_ms         = 320        # rounded to whole 32 ms windows

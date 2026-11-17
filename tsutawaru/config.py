@@ -134,10 +134,11 @@ class VadCfg:
     provisional_after_ms: int = 2500
     # Used instead of `threshold` while the gate judges the background noisy —
     # see vad.AMBIG_ON. Loud game audio makes Silero score a masked voice
-    # ambiguous rather than silent, and 0.55 then misses 29% of speech on the
-    # measured stream against 0.5% on a quiet one. 0.30 halves that (29.0% ->
-    # 18.5%) for 24.4% -> 37.7% false positive, a trade worth making only where
-    # the misses actually are. Set equal to `threshold` to switch this off.
+    # ambiguous rather than silent, and 0.55 then misses 31% of speech on the
+    # measured stream against none on a quiet one. The switch cuts that to 19.8%;
+    # an earlier sweep at a fixed 0.30 put the false positives at 24.4% -> 37.7%,
+    # a trade worth making only where the misses actually are. Set equal to
+    # `threshold` to switch this off.
     threshold_noisy: float = 0.30
 
 
