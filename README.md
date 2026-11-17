@@ -20,7 +20,7 @@ Built to follow Japanese friends in Discord voice calls in real time, and to lea
 
 ## Status
 
-*As of 2026-10-01. Developed and measured on macOS / Apple Silicon (M5 Air, 16 GB).*
+*As of 2026-11-17. Developed and measured on macOS / Apple Silicon (M5 Air, 16 GB).*
 
 | Mode | State |
 |---|---|
@@ -31,13 +31,13 @@ Built to follow Japanese friends in Discord voice calls in real time, and to lea
 **Measured on one recorded Discord call** (600 utterances, 23 minutes), run through the current pipeline:
 
 - **Speech recognition:** p50 205 ms per utterance. On the 11 hardest lines, graded by ear, the Japanese was right on 10. The 11th was unintelligible to a human listener too.
-- **Translation:** 588 of 588 lines translated offline, p50 425 ms / p95 849 ms, about 0.4% objectively broken (Japanese left in, loops, empty output).
-- **End to end:** p50 754 ms / p95 1877 ms from the voice detector closing a line to its English being ready, queue waits included, replayed in real time with nothing dropped. The detector waits about 450 ms after speech stops before it closes the line, so add that to get the delay behind the speaker.
+- **Translation:** 600 of 600 lines translated offline by the default model, PLaMo 3 Translate 2B, at p50 258 ms / p95 649 ms. One line came out objectively broken (romanized Japanese instead of English). Scored against a draft answer key for 335 of those lines, it is well ahead of the model it replaced on 2026-11-17 (see [Translation](#translation)).
+- **End to end:** p50 754 ms / p95 1877 ms from the voice detector closing a line to its English being ready, queue waits included, replayed in real time with nothing dropped. The detector waits about 450 ms after speech stops before it closes the line, so add that to get the delay behind the speaker. Measured on 2026-10-08 with the previous translator, which took about 65 ms longer per line; not re-measured since.
 
 **Known weaknesses**, in the order they are being worked on:
 
-1. **Short fragments.** Japanese often leaves out who is speaking. On a fragment, the translator completes a full English sentence and fills in a subject, usually "I", that the speaker never said. On those same 11 hard lines the English was wrong on 8 (a sample picked because it looked suspicious, so not an error rate).
-2. **A weak doubt signal.** Lines the speech recognition was unsure of are dimmed and tagged "unsure" (about 7% of call lines), and the least certain 1% are dropped. Checked against a second recogniser and the graded lines, not yet by watching it live.
+1. **Short fragments.** Japanese often leaves out who is speaking. On a fragment, the translator completes a full English sentence and fills in a subject, usually "I", that the speaker never said. On those same 11 hard lines the English was wrong on 8 (a sample picked because it looked suspicious, so not an error rate). Against the draft call key, the current translator adds an "I", "we" or "you" the key does not have on 56 of 298 lines; the previous one did on 69.
+2. **A weak doubt signal.** Lines the speech recognition was unsure of are dimmed and tagged "unsure" (about 7% of call lines), and the least certain 1% are dropped. On the recorded six-person call about one line in five is garbled, and the dimming catches about one in six of those: it separates well on long lines and hardly at all on lines of a few characters. Not yet checked by watching it live.
 3. **Very loud game audio.** On the loudest stream tested, the voice detector misses about 20% of speech starts.
 
 ## Quick Start
@@ -45,7 +45,7 @@ Built to follow Japanese friends in Discord voice calls in real time, and to lea
 ### 1. Requirements & Setup
 
 - Python 3.14 (or 3.11 fallback)
-- Apple Silicon for the defaults. Qwen3-ASR and the MLX translator download on first run.
+- Apple Silicon for the defaults. Qwen3-ASR and the MLX translator (PLaMo 3 Translate 2B, 2.3 GB) download on first run.
   On other platforms pass a Whisper model and a network translator, e.g.
   `--asr kotoba --translator google`.
 
@@ -93,7 +93,7 @@ python run.py --source discord
 # ... or a stream playing in Chrome
 python run.py --source youtube
 
-# Pick the models yourself (defaults: --asr qwen3 --translator qwen3.5)
+# Pick the models yourself (defaults: --asr qwen3 --translator plamo3)
 python run.py --source discord --asr kotoba --translator google
 
 # Force the device path, or run on Windows/Linux
@@ -134,21 +134,51 @@ transcript rather than on their own.
 
 | Tier | Default | Alternatives |
 |---|---|---|
-| Sentence | Qwen3.5-4B on MLX, offline (`--translator qwen3.5`) | `google`, `deepl` (network), `none` |
+| Sentence | PLaMo 3 Translate 2B on MLX, offline (`--translator plamo3`) | `plamo3-small`, `qwen3.5` (offline), `google`, `deepl` (network), `none` |
 | Breakdown | JMdict, then the sentence provider for what it lacks | — |
 
-The offline translator needs `mlx-lm` and Apple Silicon; it downloads
-`mlx-community/Qwen3.5-4B-MLX-4bit` on first run. It became the default on
-2026-09-29 because Google's free endpoint started refusing this machine with a
-429 CAPTCHA, and a network default shipped an app that could not translate.
+The offline translator needs `mlx-lm` and Apple Silicon. The default is
+[PLaMo 3 Translate](https://huggingface.co/pfnet/plamo-3-translate-2b-MLX-4bit)
+2B, a translation-only model from Preferred Networks, downloaded on first run.
+JMdict answers 96.7% of breakdown tokens, so nothing in a call needs the
+network.
 
-Measured on the M5 Air: 588 lines of a Discord call at p50 425 ms / p95 849 ms
-with no failures. JMdict answers 96.7% of breakdown tokens, so nothing in a call
-needs the network.
+It became the default on 2026-11-17, replacing Qwen3.5-4B, on these
+measurements. Both models were run through the same code on the same lines:
 
-On a stream, the translator is given the previous three lines of English as
-context, because a stream is one speaker. On a call it is not: tsutawaru cannot
-tell speakers apart, and the same context then assigns lines to the wrong person.
+| | PLaMo 3 Translate 2B | Qwen3.5-4B |
+|---|---|---|
+| BSD business dialogue, 1,052 lines with human English (chrF) | **43.5** | 39.2 |
+| Recorded call, 335 lines against a draft key (chrF) | **46.7** | 39.1 |
+| Call lines given an "I", "we" or "you" the key lacks (of 298) | **56** | 69 |
+| Call statements turned into questions (of 292) | **19** | 82 |
+| Call questions kept as questions (of 43) | 32 | **39** |
+| Stream questions the speech recognition flattened, kept (of 124) | 54 | **63** |
+| Per call line, p50 / p95 | **258 / 649 ms** | 322 / 777 ms |
+
+The gap on the call lines is 7.6 chrF, with a 95% interval of 5.1 to 10.2. The
+call key is a draft: it was written from the transcript, not by ear, and covers
+one call. On the 28 lines that were graded by ear it agrees with the listener
+(lines judged wrong average 31.4 against it, lines judged fine 57.1). PLaMo has
+not yet been watched through a live session.
+
+PLaMo takes no instructions, so names go in through its glossary, and tsutawaru
+puts back the "？" the speech recognition drops before translating. That is also
+where it is weaker: it keeps fewer questions than Qwen3.5, which can be told to.
+Its tokenizer is code that ships with the model, so tsutawaru runs it only at
+the two model commits it pins. `plamo3-small` is the 0.8B (BSD chrF 43.1, p50
+91 ms). `--translator qwen3.5` brings the previous default back. Three other
+translation models were measured on the same lines and were not better: Hy-MT2
+1.8B and 7B, and TranslateGemma 4B. Built with PLaMo.
+
+A local translator has been the default since 2026-09-29, when Google's free
+endpoint started refusing this machine with a 429 CAPTCHA and a network default
+shipped an app that could not translate.
+
+On a stream, the translator is given the previous three lines as context,
+because a stream is one speaker. On a call it is not: tsutawaru cannot tell
+speakers apart. Measured on the recorded call, context made Qwen3.5 worse and
+gave PLaMo no measurable gain.
 
 ## Audio Capture
 
@@ -225,3 +255,9 @@ its audio stay in one folder.
 GPL-3.0, because `pykakasi` and `PyQt6` are GPL. Both have permissive
 substitutes (`cutlet` for romaji, a Tk or web overlay for the window), so a
 build without them can be MIT.
+
+The default translator, PLaMo 3 Translate, is not part of this repository: it
+downloads from Preferred Networks under the
+[PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-en),
+which is free for personal and academic use and needs registration for
+commercial use. `--translator qwen3.5` uses an Apache-2.0 model instead.

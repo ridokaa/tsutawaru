@@ -1,4 +1,4 @@
-mlx==0.32.0
+mlx==0.32.4
 mlx-whisper==0.4.3
 # Qwen3-ASR, the default [stt] model. Pinned exactly: the engine reads token
 # scores through a private function of this version (qwen_mlx_engine._hook_logprobs).
@@ -18,4 +18,10 @@ psutil==7.2.2                    # resolves which child process carries an app's
 #   pip install "proc-tap[hq-resample]"
 
 # Offline sentence translation ([translate] provider = "mlx"). Apple Silicon.
-mlx-lm==0.31.3
+# 0.32 is the first with PLaMo 3 (--translator plamo3). Moving from 0.31.3 left
+# the ASR identical on 100 call clips and changed 155 of 1052 Qwen translations
+# with no measurable quality difference (BSD chrF 39.55 -> 39.31, CI spans 0).
+mlx-lm==0.32.2
+# Imported by PLaMo's tokenizer. Already pulled in by mlx-whisper; pinned here
+# because the translator now depends on it directly.
+numba==0.67.0

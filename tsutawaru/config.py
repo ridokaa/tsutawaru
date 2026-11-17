@@ -186,17 +186,27 @@ class TranslateCfg:
     # only, which `validate` enforces; on other platforms set "google" here.
     provider: str = "mlx"  # "mlx" | "google" | "deepl" | "none"
     deepl_api_key: str = ""
-    # provider="mlx" only: the MLX repo for the sentence lane. Measured on 100
-    # lines of each corpus against Qwen3-4B-Instruct-2507, which it replaces:
-    # objective defects 5 -> 1 on a call and 13 -> 3 on a stream, and names kept
-    # right 2/15 -> 7/15. Costs ~110 ms a line and slightly less memory.
+    # provider="mlx" only: the MLX repo for the sentence lane. PLaMo 3 Translate
+    # 2B since 2026-11-17, replacing Qwen3.5-4B. Measured through this code on
+    # the same lines (see local_mlx.REPO for the tables):
     #
-    # It is a reasoning model. `LocalTranslator._chat` turns that off, and must:
-    # left on, a two-word line takes 15 s and returns an essay about its own
-    # thinking. Any replacement needs the same check.
-    local_model: str = "mlx-community/Qwen3.5-4B-MLX-4bit"
-    # How many lines of previous *English* output to feed back as conversational
-    # context — when the capture source warrants it at all. That decision is not
+    #                                   plamo3    qwen3.5
+    #   BSD dialogue, chrF               43.5      39.2
+    #   recorded call vs draft key       46.7      39.1   (+7.6, CI +5.1..+10.2)
+    #   call statements given a "?"    19/292    82/292
+    #   call line, p50 / p95 ms       258/649   322/777
+    #
+    # It is a translation model, not a chat model: it takes no instructions, so
+    # the prompt rules in local_mlx do not reach it. Names go in through its
+    # glossary. It needs `trust_remote_code` for its tokenizer, which local_mlx
+    # grants only to the two commits it pins.
+    #
+    # `--translator qwen3.5` brings the previous default back. That one is a
+    # reasoning model: `LocalTranslator._chat` turns the reasoning off, and
+    # must — left on, a two-word line takes 15 s.
+    local_model: str = "pfnet/plamo-3-translate-2b-MLX-4bit"
+    # How many previous lines to feed back as conversational context (English
+    # only for qwen3.5; Japanese and English pairs for PLaMo) — when the capture source warrants it at all. That decision is not
     # here: `sources.single_speaker` makes it, because context is only true for
     # one voice. A stream gets it, a call does not. 0 disables it everywhere.
     #
@@ -349,7 +359,7 @@ _CHOICES = {
     ("stt", "lang_mode"): {"pinned", "detect"},
     ("nlp", "tokenizer"): {"janome", "mecab", "unidic"},
     ("nlp", "particle_romaji"): {"hepburn", "literal"},
-    # A registry key (qwen3.5) names a local model the way `--asr qwen3`
+    # A registry key (plamo3) names a local model the way `--asr qwen3`
     # does; "mlx" runs whatever `local_model` points at. "local" is the retired
     # spelling of "mlx" — `load` rewrites both to "mlx" immediately afterwards,
     # so only one string ever reaches a branch.
@@ -478,7 +488,7 @@ def load(path: str | None = None, overrides: dict[str, dict[str, Any]] | None = 
     # One canonical spelling reaches the rest of the codebase, resolved after
     # the overrides so a config.toml and a CLI flag are both covered.
     #
-    # A registry key is the interesting case: `--translator qwen3.5` names the
+    # A registry key is the interesting case: `--translator plamo3` names the
     # model, exactly as `--asr qwen3` does, and picks the repo. It wins over
     # `local_model` deliberately — naming a model on the command line has to
     # beat a stale line in config.toml, or the run disagrees with the command

@@ -154,7 +154,8 @@ def main(
         help="Run a second ASR model on the same audio and show both (A/B)."),
     provider: Optional[str] = typer.Option(
         None, "--translator", "--provider",
-        help="What turns the Japanese into English: qwen3.5 (on this Mac), "
+        help="What turns the Japanese into English: plamo3|plamo3-small|qwen3.5 "
+             "(on this Mac), "
              "google|deepl (network), none, or mlx for whatever "
              "[translate] local_model names."),
     sink: Optional[str] = typer.Option(None, "--sink", help="window|console|overlay|both"),

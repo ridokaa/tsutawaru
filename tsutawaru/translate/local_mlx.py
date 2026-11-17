@@ -1,12 +1,15 @@
 """Offline sentence translation on MLX (Apple Silicon).
 
-The shipped model is `translate.local_model`, which has been
-`mlx-community/Qwen3.5-4B-MLX-4bit` since 2026-09-21.
+The shipped model is `translate.local_model`: PLaMo 3 Translate 2B since
+2026-11-17, Qwen3.5-4B (`--translator qwen3.5`) from 2026-09-21 until then. The
+two take different paths through `_generate` — Qwen an instruction prompt,
+PLaMo its own translation template — and share everything around it.
 
 The tables below are the measurements that shaped this lane, not a description of
 what runs: they were taken on the two models Qwen3.5 replaced
 (Qwen3-4B-Instruct-2507 and CAT-Translate-1.4b), neither of which is selectable
-any more. They are kept because they are why the lane is built this way.
+any more. They are kept because they are why the lane is built this way, and
+the prompt rules they led to still apply whenever Qwen is chosen.
 Measured on 120 lines of one recorded session, M5 Air 16 GB, 4-bit, counting
 only objective defects (Japanese left in the English, length blowup, glued
 words, empty output, degenerate repetition):
@@ -72,9 +75,43 @@ log = get_logger(__name__)
 #: listed goes through `--translator mlx`, which uses `translate.local_model`
 #: verbatim, so the registry never has to be exhaustive.
 REPO = {
-    # Graded 37/40 against the 2B's 13 on the 20260915 sheet; the shipped
-    # default. Reasons by default — `_chat` turns that off, and must.
+    # Graded 37/40 against the 2B's 13 on the 20260915 sheet; the default from
+    # 2026-09-21 to 2026-11-17. Reasons by default — `_chat` turns that off,
+    # and must.
     "qwen3.5": "mlx-community/Qwen3.5-4B-MLX-4bit",
+    # PLaMo 3 Translate (PFN, PLaMo Community License — free for personal use);
+    # the 2B is the shipped default. A translation model, not a chat model: it
+    # takes no instructions, so NAME_RULE and INTENT_RULE do not reach it; names
+    # go in through its own glossary and questions through `_restore_question`.
+    # Measured 2026-11-12 against qwen3.5, both bare: BSD chrF 39.6 -> 44.1 (CI
+    # +3.6..+5.5), p50 468 -> 227 ms on the call lines, names 19/19 each. -small
+    # is the 0.8B: chrF 43.1 at p50 91 ms.
+    #
+    # Through this class on 2026-11-17, against a draft key for 335 lines of a
+    # recorded call (written from the transcript, not by ear; on the 28 ear-
+    # graded rows it scores the E rows 31.4 and the OK rows 57.1):
+    #
+    #                  chrF    person added   statement given "?"   question kept
+    #   qwen3.5        39.1      69 / 298          82 / 292            39 / 43
+    #   plamo3         46.7      56 / 298          19 / 292            32 / 43
+    #   plamo3 +ctx    47.4      53 / 298          24 / 292            30 / 43
+    #   qwen3.5 +ctx   37.4      86 / 298         137 / 292            39 / 43
+    #
+    # plamo3 over qwen3.5 is +7.6 (CI +5.1..+10.2). Context is not worth turning
+    # on for a call under either: +0.7 (CI -1.4..+2.8) and 90 ms for PLaMo, and
+    # worse on every count for qwen3.5 — see audio/sources.single_speaker.
+    # Hy-MT2 1.8B and 7B and TranslateGemma 4B were run on the same lines on
+    # 2026-11-16 and lost: 36.4, 41.0 and 36.7, the 7B at twice the latency.
+    "plamo3": "pfnet/plamo-3-translate-2b-MLX-4bit",
+    "plamo3-small": "pfnet/plamo-3-translate-0.8b-MLX-4bit",
+}
+#: The commits whose bundled code (tokenizer and model file) was read before it
+#: was allowed to run. PLaMo needs `trust_remote_code`, and a moving branch would
+#: run whatever PFN pushes next; a commit hash cannot change. Only these repos
+#: get remote code — an arbitrary `local_model` never does.
+REVISION = {
+    "pfnet/plamo-3-translate-2b-MLX-4bit": "b715145bec63f0dfe877699adbef182439b2047a",
+    "pfnet/plamo-3-translate-0.8b-MLX-4bit": "1f9227818908350380fa576794c01f5fbcbf8569",
 }
 # CAT-Translate-1.4b was the budget key here and was removed on 2026-09-21. It
 # is 2.5x faster and leaks the prompt back as output: it translates the whole
@@ -150,6 +187,48 @@ INTENT_RULE = (
     " Keep the speaker's intent in the punctuation: end a question with '?', "
     "even when the Japanese ends in a plain full stop."
 )
+
+# The input-side half of the same fix, and the only half PLaMo can take: put the
+# "？" back on a line whose words already mark it as a question. Tuned on the BSD
+# dev split (ASR-style input: final punctuation removed), then measured on the
+# test split, the 124 flattened stream questions above, and 335 lines of a
+# recorded call scored against a draft key:
+#
+#                          124 questions   BSD statements   call statements
+#                              kept          given "?"        given "?"
+#   qwen3.5, "。" stripped      49           134 / 869         77 / 292
+#   qwen3.5, this               63           151 / 869         82 / 292
+#   plamo3,  "。" stripped      37            55 / 869         14 / 292
+#   plamo3,  this               54            68 / 869         19 / 292
+#
+# It fires on 34 of the 124 — the rest are questions by intonation only, which
+# no text rule can see. chrF did not move on BSD.
+#
+# The call column is why ない and の are fenced below. The first version took any
+# line ending in either; BSD's polite dialogue did not show the cost, but on the
+# call it marked 43 statements for 17 questions and took qwen3.5 to 108 / 292.
+# Fenced, the rule itself is wrong on 8 and still right on the same 17.
+_Q_TAIL = re.compile(r"[。．.、\s]+$")
+_Q_NOT = re.compile(r"(そう|そっ|なる|わかる|分かる)か$|かな$|かしら$|かね$")  # musing
+_Q_KA = re.compile(r"(ます|ません|です|でした|ました|(でしょ|だろ)う?|のです|んです|ない|たい|る|た|の|ん|い)か$")
+# ない and の end far more statements than questions in casual speech: かもしれない,
+# なきゃいけない, ～がない, and the filler その a speaker trails off on. So ない counts only
+# where it negates a predicate (高くない, じゃない) and の only after one (行くの).
+# なんか is the filler, not 何か.
+_Q_TAG = re.compile(r"((?<!かもしれ)(?<!いけ)(?<!なら)(?<![がはも])ない|(でしょ|だろ)う?|っけ|かい|(?<=[るたいなだん])の)$")
+_Q_WH = re.compile(r"何|なに|なん(?!か|となく)|どこ|どちら|どっち|いつ|誰|だれ|なぜ|どう|どれ|どの|どんな|いくら|いくつ|どのくらい|どれくらい")
+
+
+def _restore_question(text: str) -> str:
+    """The model's input: the ASR's final stop removed, and "？" where the words
+    mark a question. A "？" or "！" the ASR did write is kept as it is."""
+    s = _Q_TAIL.sub("", text)
+    if not s or s[-1] in "？?！!" or _Q_NOT.search(s):
+        return s
+    if _Q_KA.search(s) or _Q_TAG.search(s) or (
+            _Q_WH.search(s) and re.search(r"(の|ん|か|だ|って)$", s)):
+        return s + "？"
+    return s
 
 PROMPT = (
     "Translate the following Japanese text into English. " + NAME_RULE +
@@ -416,6 +495,18 @@ def _prompt(text: str, history, names=None) -> str:
             + ", ".join(f"{jp} = {en}" for jp, en in hits) + "." + p[-cut:])
 
 
+def _plamo_messages(text: str, history) -> list[dict]:
+    """PLaMo's own context format: earlier lines as source/translation turns.
+
+    Unlike `_prompt`, the Japanese goes in too. PLaMo was trained on exactly
+    this shape, so there is no instruction for it to confuse with the text, and
+    on BSD it was worth +1.3 chrF where English-only context gave qwen3.5 none.
+    """
+    turns = [m for jp, en in history
+             for m in ({"role": "user", "content": jp}, {"role": "assistant", "content": en})]
+    return turns + [{"role": "user", "content": text}]
+
+
 class LocalTranslator(Translator):
     """Sentence-only backend. `batch()` deliberately declines the gloss lane."""
 
@@ -434,7 +525,12 @@ class LocalTranslator(Translator):
         # which one rather than which family.
         self.name = self.repo.split("/")[-1].lower()
         log.info("[translate] loading %s", self.repo)
-        self.model, self.tok = load(self.repo)
+        # ponytail: keyed on the registry — a PLaMo repo typed into local_model
+        # by hand is treated as a chat model. Widen if anyone needs that.
+        self.plamo = self.repo in REVISION
+        self.model, self.tok = load(
+            self.repo, revision=REVISION.get(self.repo), trust_remote_code=self.plamo,
+            tokenizer_config={"trust_remote_code": True} if self.plamo else None)
         # Greedy. Translation wants the same input to give the same output every
         # time — a sampled one would make the gloss cache and any A/B run noise.
         self.sampler = make_sampler(temp=0.0)
@@ -502,12 +598,20 @@ class LocalTranslator(Translator):
         """
         from mlx_lm import generate
 
-        msg = [{"role": "user", "content": _prompt(src, history, self.names)}]
+        hits = _name_hits(src, self.names)
+        if self.plamo:
+            glossary = {"glossary": [{"source": jp, "target": en} for jp, en in hits]} if hits else {}
+            prompt = self.tok.apply_chat_template(
+                _plamo_messages(src, history), target_lang="en", source_lang="ja",
+                add_generation_prompt=True, tokenize=False, **glossary)
+        else:
+            msg = [{"role": "user", "content": _prompt(src, [en for _, en in history], self.names)}]
+            prompt = self._chat(msg)
         out = generate(
-            self.model, self.tok, self._chat(msg),
+            self.model, self.tok, prompt,
             max_tokens=MAX_TOKENS, sampler=self.sampler, verbose=False,
         ).strip()
-        return _enforce_names(out, _name_hits(src, self.names))
+        return _enforce_names(out, hits)
 
     def sentence(self, text: str, remember: bool = True) -> str:
         """`remember=False` translates with the context but does not join it.
@@ -521,11 +625,14 @@ class LocalTranslator(Translator):
         if not text:
             return ""
         # The ASR's trailing "。" is a formatting habit, not a signal from the
-        # speaker, and the translator treats it as one — see INTENT_RULE. Only
-        # the text handed to the model is trimmed; `seg.original` still shows
-        # what was transcribed.
-        src = text[:-1] if text.endswith("。") else text
+        # speaker, and the translator treats it as one — see INTENT_RULE and
+        # `_restore_question`. Only the text handed to the model changes;
+        # `seg.original` still shows what was transcribed.
+        src = _restore_question(text)
         with self.lock:
+            # History holds (Japanese, English) pairs: PLaMo reads both, qwen3.5
+            # and the echo guards only the English (see `_prompt`).
+            said = [en for _, en in self.history]
             out = self._generate(src, self.history)
             if _COMMENTARY.search(out):
                 from tsutawaru.stt.filters import DROPS
@@ -539,7 +646,7 @@ class LocalTranslator(Translator):
                             "for %r — %s", text[:40], repr(out[:60]) if out else
                             "declined")
                 return out  # never remembered, like the echo below
-            if _echoes_context(out, self.history):
+            if _echoes_context(out, said):
                 from tsutawaru.stt.filters import DROPS
 
                 DROPS["mt-echo"] += 1
@@ -564,7 +671,7 @@ class LocalTranslator(Translator):
                 # the first answer is still better than an empty line — and it
                 # reuses the answer already in hand rather than paying for a
                 # third pass at the same bad prompt.
-                out = retry or _undupe(_strip_echo(out, self.history))
+                out = retry or _undupe(_strip_echo(out, said))
                 log.warning("[translate] context echoed back for %r — "
                             "retranslated without it as %r",
                             text[:40], out[:60] or "(nothing)")
@@ -587,8 +694,9 @@ class LocalTranslator(Translator):
                 # model continues the context instead.
                 return out
             if remember:
-                # The English, not the Japanese. See `_prompt`.
-                self.history.append(out)
+                # Both: qwen3.5 is shown only the English (see `_prompt`),
+                # PLaMo the pair (see `_plamo_messages`).
+                self.history.append((src, out))
         return out
 
     def batch(self, texts: list[str], remember: bool = True) -> list[str]:
@@ -652,24 +760,48 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.local_ml
     t.sampler = t.model = t.tok = None
 
     def _gen(text, out, remember=True):
-        """The two lines of `sentence` that are not the model call."""
-        _prompt(text, t.history)
+        """The lines of `sentence` that are not the model call."""
         if remember:
-            t.history.append(out)
+            t.history.append((text, out))
+
+    def _said():
+        return [en for _, en in t.history]
 
     for jp, en in [("あ", "A."), ("い", "B."), ("う", "C."), ("え", "D.")]:
         _gen(jp, en)
-    assert list(t.history) == ["B.", "C.", "D."], t.history  # maxlen drops oldest
-    assert not any("あ" in h or "え" in h for h in t.history), "Japanese in the context"
+    assert _said() == ["B.", "C.", "D."], t.history  # maxlen drops oldest
+    # qwen3.5 is shown the English only; the Japanese is for PLaMo's turns.
+    assert not any(c in _prompt("お", _said()) for c in "いうえ"), "Japanese in the context"
     _gen("alt", "ALT.", remember=False)
-    assert list(t.history) == ["B.", "C.", "D."], "compare lane polluted the context"
+    assert _said() == ["B.", "C.", "D."], "compare lane polluted the context"
+
+    # PLaMo's turns: source then translation, oldest first, this line last.
+    m = _plamo_messages("お", t.history)
+    assert [x["role"] for x in m] == ["user", "assistant"] * 3 + ["user"], m
+    assert m[0]["content"] == "い" and m[1]["content"] == "B." and m[-1]["content"] == "お"
+    assert _plamo_messages("お", []) == [{"role": "user", "content": "お"}]
 
     t.history = collections.deque(maxlen=0)  # local_context_lines = 0
     _gen("x", "X.")
-    assert not t.history and _prompt("y", t.history) == PROMPT.format(src="y")
+    assert not t.history and _prompt("y", _said()) == PROMPT.format(src="y")
 
     # --- the trailing stop the ASR adds, and the loop it helps produce -------
     assert INTENT_RULE in PROMPT and INTENT_RULE in CONTEXT_PROMPT
+    for jp, want in [("明日来ますか。", "明日来ますか？"),       # strict か
+                     ("どこに行くの", "どこに行くの？"),          # question word
+                     ("これ高くない。", "これ高くない？"),        # tag ending
+                     ("前に言ったっけ", "前に言ったっけ？"),
+                     ("そうか。", "そうか"),                     # realisation, not a question
+                     ("どうしようかな。", "どうしようかな"),      # musing
+                     ("昨日行ってきた。", "昨日行ってきた"),      # plain statement
+                     ("雨が降るかもしれない。", "雨が降るかもしれない"),  # ない that is no question
+                     ("時間がない", "時間がない"), ("早く寝なきゃいけない", "早く寝なきゃいけない"),
+                     ("とりあえずその。", "とりあえずその"),      # trailing filler, not a の question
+                     ("なんか来てるって", "なんか来てるって"),    # なんか the filler
+                     ("何が来てるって", "何が来てるって？"),
+                     ("本当？", "本当？"), ("すごい！", "すごい！"),  # the ASR's own marks kept
+                     ("", "")]:
+        assert _restore_question(jp) == want, (jp, _restore_question(jp))
     # The strip is on the model's input only; nothing here may touch the display
     # text, which is why it lives in `sentence` and not in `_prompt`.
     assert "。" in _prompt("ねこ。", []), "_prompt must not strip — sentence() does"
@@ -733,7 +865,7 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.local_ml
         name = "stub"
 
         def __init__(self, answer="It ended there."):
-            self.history = list(hist)
+            self.history = [(f"原{i}", h) for i, h in enumerate(hist)]
             self.lock = threading.Lock()
             self.answer = answer
 
@@ -747,7 +879,7 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.local_ml
     # The echoed line is never remembered, retried or not.
     stub = _Stub()
     LocalTranslator.sentence(stub, "終わった。")
-    assert list(stub.history) == hist, stub.history
+    assert [en for _, en in stub.history] == hist, stub.history
     # A retry that comes back with nothing falls back to cutting the echo out of
     # the first answer, rather than blanking the line.
     assert LocalTranslator.sentence(_Stub(answer=""), "終わった。") \
@@ -767,7 +899,7 @@ if __name__ == "__main__":  # self-check: python -m tsutawaru.translate.local_ml
 
     stub = _Meta()
     assert LocalTranslator.sentence(stub, "えっと。") == "It ended there."
-    assert list(stub.history) == hist, "commentary must not be remembered"
+    assert [en for _, en in stub.history] == hist, "commentary must not be remembered"
     assert LocalTranslator.sentence(_Meta(answer=""), "えっと。") == ""
     calls = []
     stub = _Meta()

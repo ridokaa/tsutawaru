@@ -123,11 +123,11 @@ particle_romaji = "hepburn" # "hepburn" (は->wa) | "literal" (は->ha)
 
 [translate]
 # "mlx" runs the sentence lane on this machine with no network at all, using
-# local_model below. On the CLI, --translator qwen3.5 names the model directly
+# local_model below. On the CLI, --translator plamo3 names the model directly
 # and sets local_model for you, the way --asr qwen3 does.
 # Glosses come from JMdict for every provider — build it once with:
 #   python -m tsutawaru.translate.jmdict
-# CLI: --translator qwen3.5|google|deepl|none|mlx. A model name sets
+# CLI: --translator plamo3|plamo3-small|qwen3.5|google|deepl|none|mlx. A model name sets
 # local_model too; "mlx" leaves it alone. "local" is the retired spelling of
 # "mlx" and is still accepted.
 #
@@ -138,20 +138,32 @@ particle_romaji = "hepburn" # "hepburn" (は->wa) | "literal" (は->ha)
 # objective defects in 320 translations. Set "google" if your IP is clean.
 provider           = "mlx"     # "mlx" | "google" | "deepl" | "none"
 deepl_api_key      = ""
-# Measured against Qwen3-4B-Instruct-2507, which it replaces: objective defects
-# 5 -> 1 on a call and 13 -> 3 on a stream, names kept right 2/15 -> 7/15, for
-# ~110 ms a line. A reasoning model — tsutawaru turns thinking off, without which
-# a two-word line takes 15 s.
-# CAT-Translate-1.4b was the budget alternative and was dropped on 2026-09-21:
-# it leaks the prompt back as output under every prompt shape measured, 17-26
-# defective lines per 160 against this model's 2. See local_mlx.REPO.
-local_model        = "mlx-community/Qwen3.5-4B-MLX-4bit"
-# How many lines of previous *English* output to feed the translator back as
-# conversational context, on the sources that warrant it. Whether a source
-# warrants it is decided by audio/sources.py: a YouTube stream is one voice, so
-# the previous lines really are the same speaker; a Discord call alternates and
-# tsutawaru cannot tell who is who, where the same context asserts the wrong
-# person (measured: defects 5 -> 9, subject flips 63% -> 80% on 220 utterances).
+# PLaMo 3 Translate 2B (Preferred Networks; PLaMo Community License, free for
+# personal use) since 2026-11-17. Against Qwen3.5-4B, which it replaces, on the
+# same lines through the same code:
+#
+#                                   plamo3    qwen3.5
+#   BSD dialogue, chrF               43.5      39.2
+#   recorded call vs draft key       46.7      39.1
+#   call statements given a "?"    19/292    82/292
+#   call line, p50 / p95 ms       258/649   322/777
+#
+# It takes no instructions — names reach it through its own glossary, questions
+# through the "？" tsutawaru restores before translating. Its tokenizer is code
+# that ships with the model; tsutawaru runs it only at the two commits it pins.
+# --translator qwen3.5 brings the previous default back (a reasoning model;
+# tsutawaru turns thinking off). --translator plamo3-small is the 0.8B: BSD
+# chrF 43.1 at p50 91 ms.
+# CAT-Translate-1.4b was dropped on 2026-09-21: it leaks the prompt back as
+# output under every prompt shape measured. See local_mlx.REPO.
+local_model        = "pfnet/plamo-3-translate-2b-MLX-4bit"
+# How many previous lines to feed the translator back as conversational
+# context (English only for qwen3.5; Japanese and English pairs for PLaMo), on
+# the sources that warrant it. Whether a source warrants it is decided by
+# audio/sources.py: a YouTube stream is one voice, so the previous lines really
+# are the same speaker; a Discord call alternates and tsutawaru cannot tell who
+# is who. On a recorded call, context made qwen3.5 worse on every count and
+# gave PLaMo no measurable gain for 90 ms a line (see local_mlx.REPO).
 # Set to 0 to disable it on every source.
 local_context_lines = 3
 gloss_workers      = 3         # sentence translation gets its own dedicated worker
